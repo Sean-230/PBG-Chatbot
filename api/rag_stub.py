@@ -10,7 +10,7 @@ PREREQUISITES
 - Run `python3 ingest_data.py` at least once to build the ChromaDB index.
 - Ensure GEMINI_API_KEY is set in your .env file.
 
-If ChromaDB is not yet initialised (first run before ingestion), the function
+If Pinecone is not yet initialised or credentials are missing, the function
 safely returns an empty string so the chatbot still works without RAG context.
 """
 
@@ -24,8 +24,7 @@ logger = logging.getLogger(__name__)
 # Configuration — must match the values used in ingest_data.py
 # ──────────────────────────────────────────────────────────────────────────────
 
-CHROMA_DB_PATH: str = str(Path(__file__).parent / "chroma_db")
-CHROMA_COLLECTION_NAME: str = "pbg_knowledge"
+PINECONE_INDEX_NAME: str = os.environ.get("PINECONE_INDEX_NAME", "pbg-knowledge")
 EMBEDDING_MODEL: str = "gemini-embedding-2"
 
 # Number of top-k chunks to retrieve per query.
@@ -41,39 +40,38 @@ MIN_SIMILARITY: float = 0.40
 # Lazy-initialised singletons (created once on first call)
 # ──────────────────────────────────────────────────────────────────────────────
 
-_chroma_collection = None
+_pinecone_index = None
 _genai_client = None        # google.genai.Client instance
 
 
-def _get_collection():
-    """Returns the ChromaDB collection, connecting lazily on first call."""
-    global _chroma_collection
+def _get_index():
+    """Returns the Pinecone Index, connecting lazily on first call."""
+    global _pinecone_index
 
-    if _chroma_collection is not None:
-        return _chroma_collection
+    if _pinecone_index is not None:
+        return _pinecone_index
 
-    if not Path(CHROMA_DB_PATH).exists():
+    pinecone_api_key = os.environ.get("PINECONE_API_KEY", "")
+    if not pinecone_api_key:
         logger.info(
-            "[RAG] ChromaDB not found at '%s'. "
-            "Run `python3 ingest_data.py` to build the knowledge base.",
-            CHROMA_DB_PATH,
+            "[RAG] PINECONE_API_KEY not found. "
+            "Set it in your .env file to enable RAG."
         )
         return None
 
     try:
-        import chromadb
-        client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
-        _chroma_collection = client.get_collection(name=CHROMA_COLLECTION_NAME)
+        from pinecone import Pinecone
+        pc = Pinecone(api_key=pinecone_api_key)
+        _pinecone_index = pc.Index(PINECONE_INDEX_NAME)
         logger.info(
-            "[RAG] Connected to ChromaDB collection '%s' (%d documents).",
-            CHROMA_COLLECTION_NAME,
-            _chroma_collection.count(),
+            "[RAG] Connected to Pinecone index '%s'.",
+            PINECONE_INDEX_NAME
         )
     except Exception as exc:
-        logger.warning("[RAG] Could not connect to ChromaDB: %s", exc)
+        logger.warning("[RAG] Could not connect to Pinecone: %s", exc)
         return None
 
-    return _chroma_collection
+    return _pinecone_index
 
 
 def _get_genai_client():
@@ -116,8 +114,8 @@ def query_knowledge_base(question: str) -> str:
         return ""
 
     # --- Check prerequisites ------------------------------------------------
-    collection = _get_collection()
-    if collection is None:
+    index = _get_index()
+    if index is None:
         return ""
 
     client = _get_genai_client()
@@ -140,38 +138,71 @@ def query_knowledge_base(question: str) -> str:
         logger.error("[RAG] Failed to embed query: %s", exc)
         return ""
 
-    # --- Query ChromaDB -----------------------------------------------------
+    # --- Query Pinecone -----------------------------------------------------
     try:
-        results = collection.query(
-            query_embeddings=[query_vector],
-            n_results=min(TOP_K, collection.count()),
-            include=["documents", "metadatas", "distances"],
+        results = index.query(
+            vector=query_vector,
+            top_k=TOP_K,
+            include_metadata=True
         )
     except Exception as exc:
-        logger.error("[RAG] ChromaDB query failed: %s", exc)
+        logger.error("[RAG] Pinecone query failed: %s", exc)
         return ""
+
+    # --- Smart intent detection: which sheet tab is relevant? ------------------
+    # Keywords that signal the user is asking about REQUIREMENTS (SYARAT tab)
+    SYARAT_KEYWORDS = [
+        "syarat", "persyaratan", "dokumen", "mengurus", "cara", "proses",
+        "prosedur", "bagaimana", "apa yang dibutuhkan", "apa saja", "ketentuan",
+        "persyaratan", "lampiran", "perlu", "dibutuhkan", "dokumen apa",
+    ]
+    # Keywords that signal the user is asking about STATUS (TRANSAKSI tab)
+    TRANSAKSI_KEYWORDS = [
+        "status", "nomer", "nomor", "daftar", "cek", "check", "registrasi",
+        "berkas", "permohonan saya", "progress", "sedang", "sudah", "kapan selesai",
+    ]
+
+    question_lower = question.lower()
+    wants_syarat    = any(kw in question_lower for kw in SYARAT_KEYWORDS)
+    wants_transaksi = any(kw in question_lower for kw in TRANSAKSI_KEYWORDS)
 
     # --- Filter and format results ------------------------------------------
-    documents = results.get("documents", [[]])[0]
-    distances = results.get("distances", [[]])[0]
-    metadatas = results.get("metadatas", [[]])[0]
+    matches = results.get("matches", [])
 
-    if not documents:
+    if not matches:
         return ""
 
-    # ChromaDB with cosine space: distance = 1 - cosine_similarity
-    context_parts: list[str] = []
+    # Pinecone returns 'score' which is equivalent to cosine similarity
+    # Build two buckets: preferred (matches intent) and fallback (everything else)
+    preferred_parts: list[str] = []
+    fallback_parts:  list[str] = []
 
-    for doc_text, distance, meta in zip(documents, distances, metadatas):
-        similarity = 1.0 - distance
-
+    for match in matches:
+        similarity = match.get("score", 0.0)
         if similarity < MIN_SIMILARITY:
             continue
-
+            
+        meta = match.get("metadata", {})
+        doc_text = meta.get("text", "")
         source = meta.get("source", "Dokumen PBG")
-        context_parts.append(
-            f"--- Sumber: {source} (relevansi: {similarity:.0%}) ---\n{doc_text}"
-        )
+        entry  = f"--- Sumber: {source} (relevansi: {similarity:.0%}) ---\n{doc_text}"
+
+        source_upper = source.upper()
+        is_syarat    = "SYARAT"    in source_upper
+        is_transaksi = "TRANSAKSI" in source_upper
+
+        # Route to preferred bucket when we can detect intent
+        if (wants_syarat and not wants_transaksi and is_syarat):
+            preferred_parts.append(entry)
+        elif (wants_transaksi and not wants_syarat and is_transaksi):
+            preferred_parts.append(entry)
+        else:
+            fallback_parts.append(entry)
+
+    # Merge: preferred first, then fallback (up to a reasonable cap)
+    context_parts = preferred_parts + fallback_parts
+    # Limit total context to avoid overloading the model's context window
+    context_parts = context_parts[:20]
 
     if not context_parts:
         logger.info(
@@ -181,8 +212,8 @@ def query_knowledge_base(question: str) -> str:
         return ""
 
     logger.info(
-        "[RAG] Retrieved %d relevant chunk(s) for: '%s'",
-        len(context_parts), question[:80],
+        "[RAG] Retrieved %d chunk(s) (%d preferred, %d fallback) for: '%s'",
+        len(context_parts), len(preferred_parts), len(fallback_parts), question[:80],
     )
     return "\n\n".join(context_parts)
 

@@ -15,14 +15,15 @@ REQUIRED DEPENDENCIES — install before running:
 
     pip install google-api-python-client google-auth pandas gspread \\
                 google-generativeai chromadb python-dotenv PyMuPDF \\
+                google-generativeai pinecone-client python-dotenv PyMuPDF \\
                 python-docx
 
     # PyMuPDF   → fast PDF text extraction (via `fitz`)
     # python-docx → Word document extraction
     # gspread   → clean Pandas-friendly Google Sheets reader
     # google-api-python-client + google-auth → Drive API (file listing + download)
-    # google-generativeai → Gemini embedding API
-    # chromadb  → local persistent vector store
+    # google-genai → Gemini embedding API
+    # pinecone-client → cloud vector store
 
 ──────────────────────────────────────────────────────────────────────────────
 """
@@ -37,7 +38,7 @@ import hashlib
 from pathlib import Path
 from typing import Optional
 
-import chromadb
+from pinecone import Pinecone
 import pymupdf as fitz                     # PyMuPDF — fastest PDF text extractor
 import gspread                             # Clean Google Sheets client
 from google import genai as google_genai   # google-genai (same SDK used by main.py)
@@ -84,10 +85,9 @@ EMBEDDING_TASK_TYPE: str = "RETRIEVAL_DOCUMENT"
 # Global google-genai client (initialised in main() after reading the API key)
 _genai_client = None
 
-# --- ChromaDB ----------------------------------------------------------------
-# The vector store is persisted to disk so it survives restarts.
-CHROMA_DB_PATH: str = str(Path(__file__).parent / "chroma_db")
-CHROMA_COLLECTION_NAME: str = "pbg_knowledge"
+# --- Pinecone ----------------------------------------------------------------
+# The vector store is hosted on Pinecone for serverless deployment.
+PINECONE_INDEX_NAME: str = os.environ.get("PINECONE_INDEX_NAME", "pbg-knowledge")
 
 # --- Chunking ----------------------------------------------------------------
 # Sliding-window character-level chunker parameters.
@@ -554,44 +554,45 @@ def embed_chunks(chunks: list[dict]) -> list[dict]:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Step 5 — Upsert into ChromaDB
+# Step 5 — Upsert into Pinecone
 # ──────────────────────────────────────────────────────────────────────────────
 
-def upsert_to_chroma(
-    collection: chromadb.Collection,
+def upsert_to_pinecone(
+    index,
     chunks: list[dict],
 ) -> None:
     """
-    Upserts embedded chunks into the ChromaDB collection.
-
-    "Upsert" means: insert if the ID doesn't exist, update if it does.
-    This is safe to call multiple times — re-running the script will refresh
-    existing vectors rather than creating duplicates.
+    Upserts embedded chunks into the Pinecone index.
 
     Args:
-        collection: The target ChromaDB collection.
+        index:      The target Pinecone Index object.
         chunks:     List of fully-embedded chunk dicts.
     """
     if not chunks:
         logger.warning("   No chunks to upsert.")
         return
 
-    ids        = [c["id"]        for c in chunks]
-    embeddings = [c["embedding"] for c in chunks]
-    documents  = [c["text"]      for c in chunks]
-    metadatas  = [
-        {"source": c.get("source", "unknown"), "type": c.get("type", "unknown")}
-        for c in chunks
-    ]
+    vectors = []
+    for c in chunks:
+        metadata = {
+            "source": c.get("source", "unknown"),
+            "type": c.get("type", "unknown"),
+            "text": c["text"],  # Pinecone stores the text inside metadata
+        }
+        vectors.append({
+            "id": c["id"],
+            "values": c["embedding"],
+            "metadata": metadata
+        })
 
-    collection.upsert(
-        ids=ids,
-        embeddings=embeddings,
-        documents=documents,
-        metadatas=metadatas,
-    )
+    # Pinecone recommends batching upserts in sizes of ~100
+    BATCH_SIZE = 100
+    for i in range(0, len(vectors), BATCH_SIZE):
+        batch = vectors[i:i + BATCH_SIZE]
+        index.upsert(vectors=batch)
+        time.sleep(0.5)
 
-    logger.info("   Upserted %d chunk(s) into ChromaDB collection '%s'.", len(chunks), CHROMA_COLLECTION_NAME)
+    logger.info("   Upserted %d chunk(s) into Pinecone index '%s'.", len(chunks), PINECONE_INDEX_NAME)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -608,7 +609,7 @@ def main() -> None:
             a. Google Sheets -> row-by-row structured text chunks.
             b. PDF / Docs   -> extracted text -> sliding-window chunks.
         4. Embed all chunks with Gemini.
-        5. Upsert into ChromaDB.
+        5. Upsert into Pinecone.
     """
     logger.info("=" * 70)
     logger.info("PBG RAG Ingestion Pipeline Starting")
@@ -634,15 +635,18 @@ def main() -> None:
     _genai_client = google_genai.Client(api_key=gemini_api_key)
     logger.info("Google APIs authenticated.")
 
-    # -- 2. ChromaDB setup ---------------------------------------------------
-    Path(CHROMA_DB_PATH).mkdir(parents=True, exist_ok=True)
-    chroma_client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
-    collection = chroma_client.get_or_create_collection(
-        name=CHROMA_COLLECTION_NAME,
-        # Use cosine similarity — standard for semantic search.
-        metadata={"hnsw:space": "cosine"},
-    )
-    logger.info("ChromaDB collection '%s' ready at '%s'.", CHROMA_COLLECTION_NAME, CHROMA_DB_PATH)
+    # -- 2. Pinecone setup ---------------------------------------------------
+    pinecone_api_key = os.environ.get("PINECONE_API_KEY", "")
+    if not pinecone_api_key:
+        raise EnvironmentError(
+            "PINECONE_API_KEY is not set. Add it to your .env file."
+        )
+
+    pc = Pinecone(api_key=pinecone_api_key)
+    index = pc.Index(PINECONE_INDEX_NAME)
+    
+    # Wait until index is ready before fetching stats
+    logger.info("Pinecone index '%s' ready.", PINECONE_INDEX_NAME)
 
     # -- 3. List Drive files -------------------------------------------------
     files = list_drive_files(drive_service, DRIVE_FOLDER_ID)
@@ -723,24 +727,25 @@ def main() -> None:
 
     embedded_chunks = embed_chunks(all_chunks)
 
-    # -- 6. Upsert into ChromaDB ---------------------------------------------
+    # -- 6. Upsert into Pinecone ---------------------------------------------
     logger.info("")
     logger.info("=" * 70)
-    logger.info("Upserting %d embedded chunk(s) into ChromaDB ...", len(embedded_chunks))
+    logger.info("Upserting %d embedded chunk(s) into Pinecone ...", len(embedded_chunks))
     logger.info("=" * 70)
 
-    upsert_to_chroma(collection, embedded_chunks)
+    upsert_to_pinecone(index, embedded_chunks)
 
     logger.info("")
     logger.info("=" * 70)
     logger.info("Ingestion complete!")
+    
+    # Print index stats
+    stats = index.describe_index_stats()
+    total_vectors = stats.get('total_vector_count', 0)
+    
     logger.info(
-        "   Total chunks ingested : %d",
-        collection.count(),
-    )
-    logger.info(
-        "   ChromaDB path         : %s",
-        CHROMA_DB_PATH,
+        "   Total vectors in Pinecone : %d",
+        total_vectors,
     )
     logger.info("=" * 70)
 
