@@ -218,7 +218,7 @@ function EmptyState({ onSuggest }: { onSuggest: (q: string) => void }) {
           Gedung, persyaratan dokumen, atau status permohonan Anda.
         </p>
       </div>
-      <div className="grid grid-cols-2 gap-3 mt-2 w-full max-w-md">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-2 w-full max-w-md">
         {suggestions.map((q) => (
           <button
             key={q}
@@ -250,12 +250,18 @@ function EmptyState({ onSuggest }: { onSuggest: (q: string) => void }) {
 /*  Main Page                                                                  */
 /* ────────────────────────────────────────────────────────────────────────── */
 export default function ChatPage() {
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [inputValue, setInputValue] = useState("");
 
   const { messages, sendMessage, isLoading, clearMessages } = usePBGChat();
+
+  useEffect(() => {
+    if (typeof window !== "undefined" && window.innerWidth >= 768) {
+      setSidebarOpen(true);
+    }
+  }, []);
 
   /* Auto-scroll */
   useEffect(() => {
@@ -291,12 +297,20 @@ export default function ChatPage() {
 
   return (
     <div
-      className="flex h-screen overflow-hidden"
+      className="flex h-screen overflow-hidden relative"
       style={{ background: "var(--bg-base)" }}
     >
+      {/* ── Sidebar Overlay (Mobile) ── */}
+      {sidebarOpen && (
+        <div 
+          className="md:hidden absolute inset-0 z-10 bg-black/50 transition-opacity" 
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
+      
       {/* ── Sidebar ── */}
       <aside
-        className="sidebar-transition flex flex-col overflow-hidden relative"
+        className="sidebar-transition flex flex-col overflow-hidden absolute md:relative z-20 h-full"
         style={{
           width: sidebarOpen ? "260px" : "0px",
           minWidth: sidebarOpen ? "260px" : "0px",
