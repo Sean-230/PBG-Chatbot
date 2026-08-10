@@ -14,23 +14,7 @@ python-dotenv>=1.0.0
 # ── Data validation (already a FastAPI dependency, pinned for clarity) ────────
 pydantic>=2.0.0
 
-# ── RAG Pipeline — Ingestion (ingest_data.py) ────────────────────────────────
-
-# Google Drive API — list files, download PDFs / export Docs
-google-api-python-client>=2.0.0
-google-auth>=2.0.0
-
-# Google Sheets reader (cleaner than the raw Drive API for spreadsheet data)
-gspread>=6.0.0
-
-# Tabular data manipulation (used to process sheet rows into structured chunks)
-pandas>=2.0.0
-
-# PDF text extraction — fast, accurate, no poppler dependency
-PyMuPDF>=1.24.0
-
-# Word document (.docx) text extraction
-python-docx>=1.1.0
+# Moved heavy ingest dependencies to requirements-ingest.txt
 
 # ── RAG Pipeline — Embedding ─────────────────────────────────────────────────
 
