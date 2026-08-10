@@ -29,7 +29,9 @@ CHROMA_COLLECTION_NAME: str = "pbg_knowledge"
 EMBEDDING_MODEL: str = "gemini-embedding-2"
 
 # Number of top-k chunks to retrieve per query.
-TOP_K: int = 5
+# Increased to 30 so that when querying a tracking number with many history rows,
+# all rows are fetched, allowing the AI to successfully find the newest date.
+TOP_K: int = 30
 
 # Minimum cosine similarity score (0.0–1.0) to include a result.
 # 0.4 works well for Indonesian regulatory text.

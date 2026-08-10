@@ -28,7 +28,6 @@ from config import (
     CORS_ORIGINS,
     SYSTEM_PROMPT,
 )
-from tools import TOOL_DECLARATIONS, TOOL_REGISTRY
 from rag_stub import query_knowledge_base
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -170,7 +169,6 @@ async def generate_stream(messages: list[Message]) -> AsyncGenerator[str, None]:
     # ── Generation config ────────────────────────────────────────────────────
     gen_config = types.GenerateContentConfig(
         system_instruction=effective_system_prompt,
-        tools=[TOOL_DECLARATIONS],
         temperature=0.4,
         max_output_tokens=2048,
     )

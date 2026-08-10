@@ -130,25 +130,54 @@ SCOPES: list[str] = [
 
 def build_credentials() -> service_account.Credentials:
     """
-    Loads the Service Account key from credentials.json and scopes it for
-    Drive + Sheets read access.
+    Loads Service Account credentials for Drive + Sheets access.
+
+    Priority:
+      1. GOOGLE_APPLICATION_CREDENTIALS_JSON env var — a JSON string of the
+         full service account key (used in Vercel / CI environments where
+         uploading a file is not possible).
+      2. Local credentials.json file — used during local development.
 
     Returns:
-        A google.oauth2.service_account.Credentials object ready to authenticate
-        any Google API client.
+        A google.oauth2.service_account.Credentials object scoped for
+        Drive and Sheets read access.
     """
+    creds_json_str = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON", "")
+
+    if creds_json_str:
+        # Load credentials from environment variable (Vercel / CI)
+        try:
+            creds_info = json.loads(creds_json_str)
+            creds = service_account.Credentials.from_service_account_info(
+                creds_info, scopes=SCOPES
+            )
+            logger.info(
+                "Service Account credentials loaded from env var — email: %s",
+                creds.service_account_email,
+            )
+            return creds
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise ValueError(
+                "GOOGLE_APPLICATION_CREDENTIALS_JSON env var is set but contains "
+                f"invalid JSON: {exc}"
+            ) from exc
+
+    # Fallback: load from local credentials.json file
     if not Path(CREDENTIALS_PATH).exists():
         raise FileNotFoundError(
             f"credentials.json not found at '{CREDENTIALS_PATH}'. "
-            "Download the Service Account key from Google Cloud Console and place "
-            "it in the backend directory."
+            "Either set the GOOGLE_APPLICATION_CREDENTIALS_JSON environment variable "
+            "or download the Service Account key from Google Cloud Console and place "
+            "it in the api/ directory."
         )
 
     creds = service_account.Credentials.from_service_account_file(
-        CREDENTIALS_PATH,
-        scopes=SCOPES,
+        CREDENTIALS_PATH, scopes=SCOPES
     )
-    logger.info("Service Account credentials loaded — email: %s", creds.service_account_email)
+    logger.info(
+        "Service Account credentials loaded — email: %s",
+        creds.service_account_email,
+    )
     return creds
 
 

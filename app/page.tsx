@@ -1,8 +1,6 @@
 "use client";
 
-import { useChat } from "@ai-sdk/react";
-import { DefaultChatTransport } from "ai";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import {
   Building2,
   ChevronLeft,
@@ -15,19 +13,109 @@ import {
 } from "lucide-react";
 
 /* ────────────────────────────────────────────────────────────────────────── */
-/*  Sidebar status item                                                       */
+/*  Types                                                                      */
 /* ────────────────────────────────────────────────────────────────────────── */
-function StatusItem({ label }: { label: string }) {
-  return (
-    <div className="flex items-center gap-2.5">
-      <span className="status-dot" />
-      <span style={{ color: "#8b92a8", fontSize: "0.78rem" }}>{label}</span>
-    </div>
-  );
+type ChatMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+};
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/*  Custom chat hook — calls FastAPI backend directly via fetch + streaming    */
+/* ────────────────────────────────────────────────────────────────────────── */
+function usePBGChat() {
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const messagesRef = useRef<ChatMessage[]>([]);
+  messagesRef.current = messages;
+
+  const sendMessage = useCallback(async (text: string) => {
+    if (!text.trim() || isLoading) return;
+
+    const userMsg: ChatMessage = {
+      id: crypto.randomUUID(),
+      role: "user",
+      content: text,
+    };
+
+    const assistantId = crypto.randomUUID();
+    const assistantMsg: ChatMessage = {
+      id: assistantId,
+      role: "assistant",
+      content: "",
+    };
+
+    setMessages((prev) => [...prev, userMsg, assistantMsg]);
+    setIsLoading(true);
+
+    try {
+      // Build history from current messages + the new user message
+      const history = [...messagesRef.current, userMsg].map((m) => ({
+        role: m.role,
+        content: m.content,
+        parts: [],
+      }));
+
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages: history }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Server responded with status ${response.status}`);
+      }
+
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder();
+      if (!reader) throw new Error("No response body from server");
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const raw = decoder.decode(value, { stream: true });
+
+        // Backend sends lines like: 0:"text chunk here"\n
+        for (const line of raw.split("\n")) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith("0:")) continue;
+          try {
+            const parsed = JSON.parse(trimmed.slice(2)) as string;
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === assistantId
+                  ? { ...m, content: m.content + parsed }
+                  : m
+              )
+            );
+          } catch {
+            // skip malformed lines
+          }
+        }
+      }
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : "Unknown error";
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === assistantId
+            ? { ...m, content: `❌ Terjadi kesalahan koneksi: ${errMsg}` }
+            : m
+        )
+      );
+    } finally {
+      setIsLoading(false);
+    }
+  }, [isLoading]);
+
+  const clearMessages = useCallback(() => setMessages([]), []);
+
+  return { messages, sendMessage, isLoading, clearMessages };
 }
 
 /* ────────────────────────────────────────────────────────────────────────── */
-/*  Typing indicator                                                          */
+/*  Typing indicator                                                           */
 /* ────────────────────────────────────────────────────────────────────────── */
 function TypingIndicator() {
   return (
@@ -51,7 +139,7 @@ function TypingIndicator() {
 }
 
 /* ────────────────────────────────────────────────────────────────────────── */
-/*  Single message bubble                                                     */
+/*  Single message bubble                                                      */
 /* ────────────────────────────────────────────────────────────────────────── */
 function MessageBubble({
   role,
@@ -66,7 +154,6 @@ function MessageBubble({
     <div
       className={`flex items-end gap-3 message-enter ${isUser ? "flex-row-reverse" : "flex-row"}`}
     >
-      {/* Avatar */}
       {!isUser && (
         <div
           className="flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center mb-1"
@@ -76,7 +163,6 @@ function MessageBubble({
         </div>
       )}
 
-      {/* Bubble */}
       <div
         className={`max-w-[72%] px-4 py-3 text-sm leading-relaxed ${
           isUser
@@ -85,21 +171,13 @@ function MessageBubble({
         }`}
         style={
           isUser
-            ? {
-                background:
-                  "linear-gradient(135deg, #4338ca 0%, #6d28d9 100%)",
-              }
-            : {
-                background: "#1a1d27",
-                border: "1px solid #1f2330",
-                color: "#d1d5e8",
-              }
+            ? { background: "linear-gradient(135deg, #4338ca 0%, #6d28d9 100%)" }
+            : { background: "#1a1d27", border: "1px solid #1f2330", color: "#d1d5e8" }
         }
       >
         <p className="whitespace-pre-wrap m-0">{content}</p>
       </div>
 
-      {/* User avatar placeholder */}
       {isUser && (
         <div
           className="flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center mb-1"
@@ -113,9 +191,16 @@ function MessageBubble({
 }
 
 /* ────────────────────────────────────────────────────────────────────────── */
-/*  Empty state                                                               */
+/*  Empty state                                                                */
 /* ────────────────────────────────────────────────────────────────────────── */
-function EmptyState() {
+function EmptyState({ onSuggest }: { onSuggest: (q: string) => void }) {
+  const suggestions = [
+    "Apa syarat pengajuan PBG?",
+    "Bagaimana cek status permohonan?",
+    "Berapa lama proses PBG?",
+    "Dokumen apa yang dibutuhkan?",
+  ];
+
   return (
     <div className="flex flex-col items-center justify-center h-full gap-5 px-6 text-center">
       <div
@@ -125,9 +210,7 @@ function EmptyState() {
         <Building2 size={32} color="#fff" />
       </div>
       <div>
-        <h2
-          className="text-xl font-semibold mb-1.5 gradient-text"
-        >
+        <h2 className="text-xl font-semibold mb-1.5 gradient-text">
           PBG Assist siap membantu
         </h2>
         <p style={{ color: "#8b92a8", fontSize: "0.875rem", maxWidth: "380px" }}>
@@ -136,14 +219,10 @@ function EmptyState() {
         </p>
       </div>
       <div className="grid grid-cols-2 gap-3 mt-2 w-full max-w-md">
-        {[
-          "Apa syarat pengajuan PBG?",
-          "Bagaimana cek status permohonan?",
-          "Berapa lama proses PBG?",
-          "Dokumen apa yang dibutuhkan?",
-        ].map((q) => (
+        {suggestions.map((q) => (
           <button
             key={q}
+            onClick={() => onSuggest(q)}
             className="text-left px-3.5 py-2.5 rounded-xl text-xs transition-all duration-200 hover:scale-[1.02]"
             style={{
               background: "#13161e",
@@ -168,24 +247,17 @@ function EmptyState() {
 }
 
 /* ────────────────────────────────────────────────────────────────────────── */
-/*  Main Page                                                                 */
+/*  Main Page                                                                  */
 /* ────────────────────────────────────────────────────────────────────────── */
 export default function ChatPage() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-
   const [inputValue, setInputValue] = useState("");
 
-  // useChat v4 API: returns sendMessage, status, messages, setMessages
-  // NOT: handleSubmit, handleInputChange, input, isLoading (those were v3)
-  const { messages, sendMessage, status, setMessages } = useChat({
-    transport: new DefaultChatTransport({ api: "http://localhost:8000/chat" }),
-  });
+  const { messages, sendMessage, isLoading, clearMessages } = usePBGChat();
 
-  const isLoading = status === "streaming" || status === "submitted";
-
-  /* Auto-scroll to bottom on new messages */
+  /* Auto-scroll */
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isLoading]);
@@ -198,21 +270,18 @@ export default function ChatPage() {
     el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
   }, [inputValue]);
 
-  /* Send message helper */
-  const submitMessage = () => {
-    const text = inputValue.trim();
-    if (!text || isLoading) return;
+  const submitMessage = (text?: string) => {
+    const msg = (text ?? inputValue).trim();
+    if (!msg || isLoading) return;
     setInputValue("");
-    sendMessage({ parts: [{ type: "text", text }] });
+    sendMessage(msg);
   };
 
-  /* Form submit */
   const handleFormSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     submitMessage();
   };
 
-  /* Submit on Enter (Shift+Enter = newline) */
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -220,14 +289,12 @@ export default function ChatPage() {
     }
   };
 
-  const handleClear = () => setMessages([]);
-
   return (
     <div
       className="flex h-screen overflow-hidden"
       style={{ background: "var(--bg-base)" }}
     >
-      {/* ── Sidebar ──────────────────────────────────────────────────────── */}
+      {/* ── Sidebar ── */}
       <aside
         className="sidebar-transition flex flex-col overflow-hidden relative"
         style={{
@@ -242,13 +309,11 @@ export default function ChatPage() {
           className="flex flex-col h-full p-5 overflow-hidden"
           style={{ minWidth: "260px" }}
         >
-          {/* Logo + name */}
+          {/* Logo */}
           <div className="flex items-center gap-3 mb-6">
             <div
               className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0"
-              style={{
-                background: "linear-gradient(135deg,#818cf8,#c084fc)",
-              }}
+              style={{ background: "linear-gradient(135deg,#818cf8,#c084fc)" }}
             >
               <Building2 size={20} color="#fff" />
             </div>
@@ -262,18 +327,11 @@ export default function ChatPage() {
             </div>
           </div>
 
-          {/* Divider */}
-          <div
-            className="mb-5"
-            style={{ height: "1px", background: "var(--border)" }}
-          />
+          <div className="mb-5" style={{ height: "1px", background: "var(--border)" }} />
 
-          {/* System status */}
+          {/* Status */}
           <div className="mb-5">
-            <p
-              className="text-xs font-semibold uppercase tracking-widest mb-3"
-              style={{ color: "#4b5563" }}
-            >
+            <p className="text-xs font-semibold uppercase tracking-widest mb-3" style={{ color: "#4b5563" }}>
               Sistem Status
             </p>
             <div className="flex flex-col gap-3">
@@ -281,35 +339,24 @@ export default function ChatPage() {
                 <span className="status-dot" />
                 <div className="flex items-center gap-1.5">
                   <Database size={12} style={{ color: "#6b7280" }} />
-                  <span style={{ color: "#8b92a8", fontSize: "0.78rem" }}>
-                    Knowledge Base: Online
-                  </span>
+                  <span style={{ color: "#8b92a8", fontSize: "0.78rem" }}>Knowledge Base: Online</span>
                 </div>
               </div>
               <div className="flex items-center gap-2.5">
                 <span className="status-dot" />
                 <div className="flex items-center gap-1.5">
                   <Cpu size={12} style={{ color: "#6b7280" }} />
-                  <span style={{ color: "#8b92a8", fontSize: "0.78rem" }}>
-                    Python AI Engine: Ready
-                  </span>
+                  <span style={{ color: "#8b92a8", fontSize: "0.78rem" }}>Python AI Engine: Ready</span>
                 </div>
               </div>
             </div>
           </div>
 
-          {/* Divider */}
-          <div
-            className="mb-5"
-            style={{ height: "1px", background: "var(--border)" }}
-          />
+          <div className="mb-5" style={{ height: "1px", background: "var(--border)" }} />
 
           {/* About */}
           <div className="flex-1">
-            <p
-              className="text-xs font-semibold uppercase tracking-widest mb-3"
-              style={{ color: "#4b5563" }}
-            >
+            <p className="text-xs font-semibold uppercase tracking-widest mb-3" style={{ color: "#4b5563" }}>
               Tentang
             </p>
             <p style={{ color: "#6b7280", fontSize: "0.75rem", lineHeight: "1.6" }}>
@@ -319,67 +366,43 @@ export default function ChatPage() {
           </div>
 
           {/* Footer */}
-          <div
-            className="pt-4"
-            style={{ borderTop: "1px solid var(--border)" }}
-          >
+          <div className="pt-4" style={{ borderTop: "1px solid var(--border)" }}>
             <p style={{ color: "#374151", fontSize: "0.68rem", textAlign: "center" }}>
-              v0.1.0 · Stub Mode · PBG Assist
+              v0.2.0 · PBG Assist
             </p>
           </div>
         </div>
       </aside>
 
-      {/* ── Main Area ──────────────────────────────────────────────────────── */}
+      {/* ── Main ── */}
       <main className="flex flex-col flex-1 overflow-hidden">
         {/* Header */}
         <header
           className="flex items-center justify-between px-5 py-3.5 flex-shrink-0"
-          style={{
-            background: "var(--bg-surface)",
-            borderBottom: "1px solid var(--border)",
-          }}
+          style={{ background: "var(--bg-surface)", borderBottom: "1px solid var(--border)" }}
         >
           <div className="flex items-center gap-3">
-            {/* Sidebar toggle */}
             <button
               onClick={() => setSidebarOpen((p) => !p)}
               className="w-8 h-8 rounded-lg flex items-center justify-center transition-all duration-200 hover:scale-110"
-              style={{
-                background: "var(--bg-input)",
-                border: "1px solid var(--border)",
-                color: "#8b92a8",
-              }}
+              style={{ background: "var(--bg-input)", border: "1px solid var(--border)", color: "#8b92a8" }}
               aria-label="Toggle sidebar"
             >
-              {sidebarOpen ? (
-                <ChevronLeft size={15} />
-              ) : (
-                <ChevronRight size={15} />
-              )}
+              {sidebarOpen ? <ChevronLeft size={15} /> : <ChevronRight size={15} />}
             </button>
-
             <div className="flex items-center gap-2">
               <MessageSquare size={16} style={{ color: "#818cf8" }} />
-              <span
-                className="font-semibold text-sm"
-                style={{ color: "#c7d0f0" }}
-              >
+              <span className="font-semibold text-sm" style={{ color: "#c7d0f0" }}>
                 PBG Customer Support
               </span>
             </div>
           </div>
 
-          {/* Clear chat */}
           {messages.length > 0 && (
             <button
-              onClick={handleClear}
+              onClick={clearMessages}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs transition-all duration-200 hover:scale-105"
-              style={{
-                background: "var(--bg-input)",
-                border: "1px solid var(--border)",
-                color: "#6b7280",
-              }}
+              style={{ background: "var(--bg-input)", border: "1px solid var(--border)", color: "#6b7280" }}
               onMouseEnter={(e) => {
                 (e.currentTarget as HTMLButtonElement).style.color = "#f472b6";
                 (e.currentTarget as HTMLButtonElement).style.borderColor = "#f472b6";
@@ -395,48 +418,34 @@ export default function ChatPage() {
           )}
         </header>
 
-        {/* Message feed */}
+        {/* Messages */}
         <div className="flex-1 overflow-y-auto px-4 py-6 space-y-5">
           {messages.length === 0 ? (
-            <EmptyState />
+            <EmptyState onSuggest={(q) => submitMessage(q)} />
           ) : (
             <>
               {messages.map((m) => {
-                const textContent =
-                  m.parts
-                    ?.filter((p) => p.type === "text")
-                    .map((p) => "text" in p ? p.text : "")
-                    .join("") || "";
-
-                return (
-                  <MessageBubble
-                    key={m.id}
-                    role={m.role as "user" | "assistant"}
-                    content={textContent}
-                  />
-                );
+                // Don't render empty assistant bubbles (TypingIndicator handles this state)
+                if (m.role === "assistant" && !m.content) return null;
+                return <MessageBubble key={m.id} role={m.role} content={m.content} />;
               })}
-              {isLoading && <TypingIndicator />}
+              {isLoading && messages[messages.length - 1]?.role === "assistant" && !messages[messages.length - 1]?.content && (
+                <TypingIndicator />
+              )}
               <div ref={messagesEndRef} />
             </>
           )}
         </div>
 
-        {/* Input area */}
+        {/* Input */}
         <div
           className="px-4 py-4 flex-shrink-0"
-          style={{
-            background: "var(--bg-surface)",
-            borderTop: "1px solid var(--border)",
-          }}
+          style={{ background: "var(--bg-surface)", borderTop: "1px solid var(--border)" }}
         >
           <form
             onSubmit={handleFormSubmit}
             className="flex items-end gap-3 rounded-2xl px-4 py-3 input-glow transition-all duration-200"
-            style={{
-              background: "var(--bg-input)",
-              border: "1px solid var(--border)",
-            }}
+            style={{ background: "var(--bg-input)", border: "1px solid var(--border)" }}
           >
             <textarea
               id="chat-input"
@@ -448,11 +457,7 @@ export default function ChatPage() {
               rows={1}
               disabled={isLoading}
               className="flex-1 resize-none bg-transparent outline-none text-sm leading-relaxed p-0 m-0 py-1.5"
-              style={{
-                color: "#d1d5e8",
-                maxHeight: "160px",
-                overflowY: "auto",
-              }}
+              style={{ color: "#d1d5e8", maxHeight: "160px", overflowY: "auto" }}
             />
             <button
               id="send-button"
@@ -465,8 +470,6 @@ export default function ChatPage() {
                     ? "#1f2330"
                     : "linear-gradient(135deg,#818cf8,#c084fc)",
                 cursor: isLoading || !inputValue.trim() ? "not-allowed" : "pointer",
-                transform:
-                  isLoading || !inputValue.trim() ? "scale(1)" : "scale(1.05)",
               }}
             >
               <Send
@@ -475,12 +478,8 @@ export default function ChatPage() {
               />
             </button>
           </form>
-          <p
-            className="text-center mt-2"
-            style={{ fontSize: "0.65rem", color: "#374151" }}
-          >
-            PBG Assist dapat membuat kesalahan. Selalu verifikasi informasi
-            penting dengan instansi terkait.
+          <p className="text-center mt-2" style={{ fontSize: "0.65rem", color: "#374151" }}>
+            PBG Assist dapat membuat kesalahan. Selalu verifikasi informasi penting dengan instansi terkait.
           </p>
         </div>
       </main>

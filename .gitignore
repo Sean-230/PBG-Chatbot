@@ -1,17 +1,18 @@
-# ── Backend ───────────────────────────
-backend/credentials.json
-backend/.env
-backend/chroma_db/
-backend/__pycache__/
-backend/.venv/
-backend/venv/
+# ── Secrets & Credentials ─────────────────────────────────────────────────────
+api/credentials.json
+api/.env
+api/__pycache__/
+api/chroma_db/
+api/.venv/
+api/venv/
 
-# ── Frontend ──────────────────────────
-frontend/.env
-frontend/.env.local
-frontend/node_modules/
-frontend/.next/
+# ── Frontend (Next.js at root) ────────────────────────────────────────────────
+.env
+.env.local
+node_modules/
+.next/
+.vercel/
 
-# ── General ───────────────────────────
+# ── General ───────────────────────────────────────────────────────────────────
 .DS_Store
 *.log
