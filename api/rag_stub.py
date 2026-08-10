@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 # ──────────────────────────────────────────────────────────────────────────────
 
 PINECONE_INDEX_NAME: str = os.environ.get("PINECONE_INDEX_NAME", "pbg-knowledge")
-EMBEDDING_MODEL: str = "gemini-embedding-2"
+EMBEDDING_MODEL: str = "gemini-embedding-001"
 
 # Number of top-k chunks to retrieve per query.
 # Increased to 30 so that when querying a tracking number with many history rows,
@@ -130,7 +130,10 @@ def query_knowledge_base(question: str) -> str:
         response = client.models.embed_content(
             model=EMBEDDING_MODEL,
             contents=question,
-            config=genai.types.EmbedContentConfig(task_type="RETRIEVAL_QUERY"),
+            config=genai.types.EmbedContentConfig(
+                task_type="RETRIEVAL_QUERY",
+                output_dimensionality=768,
+            ),
         )
         query_vector = response.embeddings[0].values
 

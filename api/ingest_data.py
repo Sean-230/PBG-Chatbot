@@ -75,7 +75,7 @@ CREDENTIALS_PATH: str = os.environ.get(
 
 # --- Embedding model ---------------------------------------------------------
 # Google's recommended embedding model for semantic search tasks.
-EMBEDDING_MODEL: str = "gemini-embedding-2"
+EMBEDDING_MODEL: str = "gemini-embedding-001"
 
 # The task type tells the embedding model how the vector will be used.
 # RETRIEVAL_DOCUMENT → optimise vectors for storage / retrieval.
@@ -536,19 +536,31 @@ def embed_chunks(chunks: list[dict]) -> list[dict]:
         if i % 10 == 0 or i == 1 or i == len(chunks):
             logger.info("   Embedding chunk %d / %d ...", i, len(chunks))
 
-        response = _genai_client.models.embed_content(
-            model=EMBEDDING_MODEL,
-            contents=chunk["text"],
-            config=google_genai.types.EmbedContentConfig(
-                task_type=EMBEDDING_TASK_TYPE,
-            ),
-        )
-        chunk["embedding"] = response.embeddings[0].values
-        embedded.append(chunk)
+        # Adding retry loop for rate limit resilience
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = _genai_client.models.embed_content(
+                    model=EMBEDDING_MODEL,
+                    contents=chunk["text"],
+                    config=google_genai.types.EmbedContentConfig(
+                        task_type=EMBEDDING_TASK_TYPE,
+                        output_dimensionality=768,
+                    ),
+                )
+                chunk["embedding"] = response.embeddings[0].values
+                embedded.append(chunk)
+                break
+            except Exception as e:
+                if "429" in str(e) and attempt < max_retries - 1:
+                    logger.warning("   Rate limit hit, sleeping for 30s before retry...")
+                    time.sleep(30.0)
+                else:
+                    raise e
 
-        # 1 second delay per request = ~60 requests per minute.
+        # 1.5 second delay per request = ~40 requests per minute.
         # Free tier allows 100 requests per minute.
-        time.sleep(1.0)
+        time.sleep(1.5)
 
     return embedded
 
