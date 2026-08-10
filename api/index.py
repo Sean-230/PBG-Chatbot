@@ -235,7 +235,7 @@ async def health_check():
     return {"status": "ok", "service": "PBG Assist Backend", "version": "0.1.0"}
 
 
-@app.post("/chat", tags=["Chat"])
+@app.post("/api/chat", tags=["Chat"])
 async def chat(request: ChatRequest):
     """
     Accepts a conversation history and streams a Gemini-powered response.
