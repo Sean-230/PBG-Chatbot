@@ -1,0 +1,47 @@
+# PBG Chatbot Backend — Python Dependencies
+# Install with: pip install -r requirements.txt
+
+# ── Core ─────────────────────────────────────────────────────────────────────
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+
+# ── Google Gemini AI ──────────────────────────────────────────────────────────
+google-genai>=1.0.0
+
+# ── Configuration ────────────────────────────────────────────────────────────
+python-dotenv>=1.0.0
+
+# ── Data validation (already a FastAPI dependency, pinned for clarity) ────────
+pydantic>=2.0.0
+
+# ── RAG Pipeline — Ingestion (ingest_data.py) ────────────────────────────────
+
+# Google Drive API — list files, download PDFs / export Docs
+google-api-python-client>=2.0.0
+google-auth>=2.0.0
+
+# Google Sheets reader (cleaner than the raw Drive API for spreadsheet data)
+gspread>=6.0.0
+
+# Tabular data manipulation (used to process sheet rows into structured chunks)
+pandas>=2.0.0
+
+# PDF text extraction — fast, accurate, no poppler dependency
+PyMuPDF>=1.24.0
+
+# Word document (.docx) text extraction
+python-docx>=1.1.0
+
+# ── RAG Pipeline — Embedding ─────────────────────────────────────────────────
+
+# google-genai SDK — already a core dependency above (google-genai>=1.0.0).
+# Used for embeddings (models/embedding-001) in ingest_data.py + rag_stub.py.
+# No additional package needed.
+
+# ── RAG Pipeline — Vector Store ──────────────────────────────────────────────
+
+# ChromaDB — local, file-based vector store; zero infrastructure required
+chromadb>=0.5.0
+
+# ── HTTP client (for real SIMBG scraping in tools.py) ────────────────────────
+# httpx>=0.27.0
