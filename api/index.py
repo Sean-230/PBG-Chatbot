@@ -22,14 +22,18 @@ from pydantic import BaseModel
 from google import genai
 from google.genai import types
 
-from config import (
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+from .config import (
     GEMINI_API_KEY,
     GEMINI_MODEL,
     CORS_ORIGINS,
     SYSTEM_PROMPT,
 )
-from rag_stub import query_knowledge_base
-from tools import TOOL_DECLARATIONS, TOOL_REGISTRY
+from .rag_stub import query_knowledge_base
+from .tools import TOOL_DECLARATIONS, TOOL_REGISTRY
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Logging
