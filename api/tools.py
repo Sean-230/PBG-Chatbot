@@ -26,48 +26,77 @@ from google.genai import types
 
 def check_pbg_status(registration_id: str) -> str:
     """
-    Checks the current status of a PBG (Persetujuan Bangunan Gedung) application.
-
-    In production, replace this stub with a real HTTP call to the SIMBG API
-    or a web scraper targeting simbg.pu.go.id.
+    Checks the current status of a PBG application by searching the
+    TRANSAKSI data stored in Pinecone for the given registration number.
 
     Args:
-        registration_id: The registration/berkas number provided by the user.
+        registration_id: The No. Daftar / berkas number provided by the user.
 
     Returns:
-        A JSON string representing the current application status.
+        A JSON string representing the found records, or a not-found message.
     """
-    # TODO: Replace this hardcoded mock with a real SIMBG API call or scraper.
-    # Example production implementation:
-    #   response = httpx.get(f"https://simbg.pu.go.id/api/status/{registration_id}")
-    #   return response.text
+    import json
+    from rag_stub import _get_index
 
-    mock_statuses = {
-        "DEFAULT": {
+    registration_id = registration_id.strip()
+    index = _get_index()
+
+    if index is None:
+        return json.dumps({
+            "status": "error",
+            "message": "Koneksi ke database tidak tersedia.",
+        }, ensure_ascii=False)
+
+    try:
+        # Use a tiny random vector to sample vectors broadly.
+        # Pinecone's ANN index returns 0 results for zero vectors.
+        import random
+        sample_vec = [random.uniform(-0.001, 0.001) for _ in range(768)]
+
+        results = index.query(
+            vector=sample_vec,
+            top_k=300,
+            include_metadata=True,
+        )
+
+        matches = results.get("matches", [])
+
+        # Search for the registration number in the text of each chunk
+        found_records = []
+        for match in matches:
+            meta = match.get("metadata", {})
+            text = meta.get("text", "")
+            source = meta.get("source", "")
+
+            # Only look in TRANSAKSI tab
+            if "TRANSAKSI" not in source.upper():
+                continue
+
+            # Check if registration_id appears in the text (case-insensitive)
+            if registration_id in text or registration_id.lower() in text.lower():
+                found_records.append(text)
+
+        if not found_records:
+            return json.dumps({
+                "registration_id": registration_id,
+                "status": "Tidak ditemukan",
+                "message": (
+                    f"Nomor daftar '{registration_id}' tidak ditemukan dalam database TRANSAKSI. "
+                    "Pastikan nomor yang Anda masukkan sudah benar."
+                ),
+            }, ensure_ascii=False)
+
+        return json.dumps({
             "registration_id": registration_id,
-            "status": "Menunggu Sidang TPT",
-            "stage": "Verifikasi Teknis",
-            "submitted_date": "2025-07-14",
-            "estimated_completion_days": 14,
-            "officer": "Dinas PUPR Kota - Seksi Bangunan Gedung",
-            "notes": (
-                "Berkas Anda sedang dalam antrian sidang Tim Profesi Ahli (TPA). "
-                "Harap menunggu notifikasi melalui email terdaftar."
-            ),
-        },
-        "BG999": {
-            "registration_id": "BG999",
-            "status": "PBG Diterbitkan",
-            "stage": "Selesai",
-            "submitted_date": "2025-05-01",
-            "issued_date": "2025-06-20",
-            "estimated_completion_days": 0,
-            "notes": "PBG telah diterbitkan. Silakan unduh dokumen dari portal SIMBG.",
-        },
-    }
+            "status": "Ditemukan",
+            "records": found_records,
+        }, ensure_ascii=False)
 
-    result = mock_statuses.get(registration_id.upper(), mock_statuses["DEFAULT"])
-    return json.dumps(result, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({
+            "status": "error",
+            "message": f"Terjadi kesalahan saat mengakses database: {exc}",
+        }, ensure_ascii=False)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
