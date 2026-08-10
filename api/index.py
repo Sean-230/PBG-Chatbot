@@ -29,6 +29,7 @@ from config import (
     SYSTEM_PROMPT,
 )
 from rag_stub import query_knowledge_base
+from tools import TOOL_DECLARATIONS, TOOL_REGISTRY
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Logging
@@ -171,6 +172,7 @@ async def generate_stream(messages: list[Message]) -> AsyncGenerator[str, None]:
         system_instruction=effective_system_prompt,
         temperature=0.4,
         max_output_tokens=2048,
+        tools=[TOOL_DECLARATIONS],
     )
 
     # ── Agentic loop: keep iterating until no more tool calls ────────────────
