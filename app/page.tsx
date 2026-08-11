@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   Building2,
   ChevronLeft,
@@ -10,6 +12,9 @@ import {
   Cpu,
   MessageSquare,
   RotateCcw,
+  Mic,
+  Volume2,
+  VolumeX,
 } from "lucide-react";
 
 /* ────────────────────────────────────────────────────────────────────────── */
@@ -175,7 +180,40 @@ function MessageBubble({
             : { background: "#1a1d27", border: "1px solid #1f2330", color: "#d1d5e8" }
         }
       >
-        <p className="whitespace-pre-wrap m-0">{content}</p>
+        {isUser ? (
+          <p className="whitespace-pre-wrap m-0">{content}</p>
+        ) : (
+          <div className="markdown-content text-sm">
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              components={{
+                p: ({node, ...props}) => <p className="mb-2 last:mb-0 leading-relaxed" {...props} />,
+                ul: ({node, ...props}) => <ul className="list-disc pl-5 mb-2 space-y-1" {...props} />,
+                ol: ({node, ...props}) => <ol className="list-decimal pl-5 mb-2 space-y-1" {...props} />,
+                li: ({node, ...props}) => <li {...props} />,
+                h1: ({node, ...props}) => <h1 className="text-xl font-bold mb-2 mt-4 text-white" {...props} />,
+                h2: ({node, ...props}) => <h2 className="text-lg font-bold mb-2 mt-4 text-white" {...props} />,
+                h3: ({node, ...props}) => <h3 className="text-md font-bold mb-2 mt-3 text-white" {...props} />,
+                strong: ({node, ...props}) => <strong className="font-semibold text-[#f8fafc]" {...props} />,
+                a: ({node, ...props}) => <a className="text-indigo-400 hover:underline" {...props} />,
+                code: ({node, inline, className, children, ...props}: any) => {
+                  const match = /language-(\w+)/.exec(className || '')
+                  return inline ? (
+                    <code className="bg-[#1f2330] px-1.5 py-0.5 rounded text-[#f472b6] text-xs font-mono" {...props}>
+                      {children}
+                    </code>
+                  ) : (
+                    <code className="block bg-[#1f2330] p-3 rounded-lg overflow-x-auto text-xs font-mono mb-2" {...props}>
+                      {children}
+                    </code>
+                  )
+                }
+              }}
+            >
+              {content}
+            </ReactMarkdown>
+          </div>
+        )}
       </div>
 
       {isUser && (
@@ -254,8 +292,146 @@ export default function ChatPage() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [inputValue, setInputValue] = useState("");
+  const [voiceEnabled, setVoiceEnabled] = useState(true);
+  const [lastSpokenId, setLastSpokenId] = useState<string | null>(null);
+  const [isListening, setIsListening] = useState(false);
+  const recognitionRef = useRef<any>(null);
 
   const { messages, sendMessage, isLoading, clearMessages } = usePBGChat();
+
+  // Strips markdown symbols so TTS doesn't read them out loud
+  const cleanForSpeech = (text: string): string => {
+    return text
+      // Remove markdown headers
+      .replace(/#{1,6}\s*/g, '')
+      // Remove bold/italic (* or _)
+      .replace(/[*_]{1,3}/g, '')
+      // Remove list bullets at start of line
+      .replace(/^\s*[-+•]\s+/gm, '')
+      // Remove numbered lists (e.g. "1. " or "2) ")
+      .replace(/^\s*\d+[.)\s]+/gm, '')
+      // Strip markdown links, keep text
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+      // Remove backticks
+      .replace(/`+/g, '')
+      // Remove horizontal rules
+      .replace(/^[-*_]{3,}$/gm, '')
+      // Remove blockquote markers
+      .replace(/^>\s*/gm, '')
+      // Remove parenthesised URLs
+      .replace(/https?:\/\/\S+/g, '')
+      // Collapse multiple blank lines
+      .replace(/\n{3,}/g, '\n\n')
+      // Collapse multiple spaces
+      .replace(/  +/g, ' ')
+      .trim();
+  };
+
+  // Pick the best available Indonesian (or fallback) voice
+  const getBestVoice = (): SpeechSynthesisVoice | null => {
+    const voices = window.speechSynthesis.getVoices();
+    // Prefer id-ID voices first, then any language with "id"
+    const preferred = voices.find(v => v.lang === 'id-ID') ||
+      voices.find(v => v.lang.startsWith('id')) ||
+      // Fallback: English female voices tend to sound most natural
+      voices.find(v => v.lang.startsWith('en') && v.name.toLowerCase().includes('samantha')) ||
+      voices.find(v => v.lang.startsWith('en') && v.name.toLowerCase().includes('female')) ||
+      voices.find(v => v.lang.startsWith('en')) ||
+      null;
+    return preferred;
+  };
+
+  // Voice output (TTS)
+  useEffect(() => {
+    if (!isLoading && voiceEnabled && messages.length > 0) {
+      const lastMsg = messages[messages.length - 1];
+      if (lastMsg.role === "assistant" && lastMsg.content && lastMsg.id !== lastSpokenId) {
+        setLastSpokenId(lastMsg.id);
+
+        if (typeof window === "undefined" || !window.speechSynthesis) return;
+
+        window.speechSynthesis.cancel();
+
+        const speak = () => {
+          const cleaned = cleanForSpeech(lastMsg.content);
+          if (!cleaned) return;
+
+          const utterance = new SpeechSynthesisUtterance(cleaned);
+          utterance.lang = "id-ID";
+          utterance.rate = 0.92;   // Slightly slower than default = more natural
+          utterance.pitch = 1.05;  // Slightly higher pitch = warmer/friendlier
+          utterance.volume = 1;
+
+          const bestVoice = getBestVoice();
+          if (bestVoice) utterance.voice = bestVoice;
+
+          window.speechSynthesis.speak(utterance);
+        };
+
+        // Voices may not be loaded yet — wait for them
+        if (window.speechSynthesis.getVoices().length > 0) {
+          speak();
+        } else {
+          window.speechSynthesis.onvoiceschanged = () => {
+            speak();
+            window.speechSynthesis.onvoiceschanged = null;
+          };
+        }
+      }
+    }
+  }, [isLoading, messages, voiceEnabled, lastSpokenId]);
+
+  // Stop speaking if voice is disabled mid-speech
+  useEffect(() => {
+    if (!voiceEnabled && typeof window !== "undefined" && window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+    }
+  }, [voiceEnabled]);
+
+  // Speech Recognition (STT) setup
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+      if (SpeechRecognition) {
+        recognitionRef.current = new SpeechRecognition();
+        recognitionRef.current.continuous = false;
+        recognitionRef.current.interimResults = true;
+        recognitionRef.current.lang = "id-ID";
+
+        recognitionRef.current.onresult = (event: any) => {
+          let currentTranscript = "";
+          for (let i = 0; i < event.results.length; ++i) {
+            currentTranscript += event.results[i][0].transcript;
+          }
+          if (currentTranscript) {
+            setInputValue(currentTranscript);
+          }
+        };
+
+        recognitionRef.current.onerror = (event: any) => {
+          console.error("Speech recognition error", event.error);
+          setIsListening(false);
+        };
+
+        recognitionRef.current.onend = () => {
+          setIsListening(false);
+        };
+      }
+    }
+  }, []);
+
+  const toggleListening = () => {
+    if (!recognitionRef.current) {
+      alert("Browser Anda tidak mendukung fitur pengenalan suara.");
+      return;
+    }
+    if (isListening) {
+      recognitionRef.current.stop();
+    } else {
+      recognitionRef.current.start();
+      setIsListening(true);
+    }
+  };
 
   useEffect(() => {
     if (typeof window !== "undefined" && window.innerWidth >= 768) {
@@ -412,24 +588,39 @@ export default function ChatPage() {
             </div>
           </div>
 
-          {messages.length > 0 && (
+          <div className="flex items-center gap-2">
             <button
-              onClick={clearMessages}
+              onClick={() => setVoiceEnabled(!voiceEnabled)}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs transition-all duration-200 hover:scale-105"
-              style={{ background: "var(--bg-input)", border: "1px solid var(--border)", color: "#6b7280" }}
-              onMouseEnter={(e) => {
-                (e.currentTarget as HTMLButtonElement).style.color = "#f472b6";
-                (e.currentTarget as HTMLButtonElement).style.borderColor = "#f472b6";
-              }}
-              onMouseLeave={(e) => {
-                (e.currentTarget as HTMLButtonElement).style.color = "#6b7280";
-                (e.currentTarget as HTMLButtonElement).style.borderColor = "var(--border)";
+              style={{
+                background: voiceEnabled ? "rgba(129, 140, 248, 0.1)" : "var(--bg-input)",
+                border: "1px solid",
+                borderColor: voiceEnabled ? "#818cf8" : "var(--border)",
+                color: voiceEnabled ? "#818cf8" : "#6b7280"
               }}
             >
-              <RotateCcw size={12} />
-              Clear chat
+              {voiceEnabled ? <Volume2 size={14} /> : <VolumeX size={14} />}
+              {voiceEnabled ? "Voice On" : "Voice Off"}
             </button>
-          )}
+            {messages.length > 0 && (
+              <button
+                onClick={clearMessages}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs transition-all duration-200 hover:scale-105"
+                style={{ background: "var(--bg-input)", border: "1px solid var(--border)", color: "#6b7280" }}
+                onMouseEnter={(e) => {
+                  (e.currentTarget as HTMLButtonElement).style.color = "#f472b6";
+                  (e.currentTarget as HTMLButtonElement).style.borderColor = "#f472b6";
+                }}
+                onMouseLeave={(e) => {
+                  (e.currentTarget as HTMLButtonElement).style.color = "#6b7280";
+                  (e.currentTarget as HTMLButtonElement).style.borderColor = "var(--border)";
+                }}
+              >
+                <RotateCcw size={12} />
+                Clear chat
+              </button>
+            )}
+          </div>
         </header>
 
         {/* Messages */}
@@ -473,6 +664,19 @@ export default function ChatPage() {
               className="flex-1 resize-none bg-transparent outline-none text-sm leading-relaxed p-0 m-0 py-1.5"
               style={{ color: "#d1d5e8", maxHeight: "160px", overflowY: "auto" }}
             />
+            <button
+              type="button"
+              onClick={toggleListening}
+              className={`flex-shrink-0 w-9 h-9 rounded-xl flex items-center justify-center transition-all duration-200 mb-0.5 ${isListening ? "animate-pulse" : ""}`}
+              style={{
+                background: isListening ? "rgba(244, 114, 182, 0.1)" : "#1f2330",
+                border: "1px solid",
+                borderColor: isListening ? "#f472b6" : "transparent",
+                color: isListening ? "#f472b6" : "#6b7280",
+              }}
+            >
+              <Mic size={15} />
+            </button>
             <button
               id="send-button"
               type="submit"

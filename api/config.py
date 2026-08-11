@@ -24,6 +24,7 @@ if not GEMINI_API_KEY:
 # Switch to "gemini-3.6-flash" or "gemini-3.5-pro" as needed.
 GEMINI_MODEL: str = os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite")
 
+
 # ──────────────────────────────────────────────────────────────────────────────
 # CORS
 # ──────────────────────────────────────────────────────────────────────────────
