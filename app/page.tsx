@@ -303,9 +303,15 @@ export default function ChatPage() {
   // Prime the speech engine for mobile browsers (must be called on user interaction)
   const initVoice = () => {
     if (!voiceInitializedRef.current && typeof window !== "undefined" && window.speechSynthesis) {
-      const utterance = new SpeechSynthesisUtterance("");
-      utterance.volume = 0; // Silent
+      // iOS Safari ignores empty strings and 0 volume
+      const utterance = new SpeechSynthesisUtterance(" ");
+      utterance.volume = 0.01;
+      utterance.rate = 10; // Fast
       window.speechSynthesis.speak(utterance);
+      
+      // Also trigger voices to load
+      window.speechSynthesis.getVoices();
+      
       voiceInitializedRef.current = true;
     }
   };
@@ -361,7 +367,9 @@ export default function ChatPage() {
 
         if (typeof window === "undefined" || !window.speechSynthesis) return;
 
-        window.speechSynthesis.cancel();
+        if (window.speechSynthesis.speaking) {
+          window.speechSynthesis.cancel();
+        }
 
         const speak = () => {
           const cleaned = cleanForSpeech(lastMsg.content);
