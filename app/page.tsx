@@ -296,8 +296,19 @@ export default function ChatPage() {
   const [lastSpokenId, setLastSpokenId] = useState<string | null>(null);
   const [isListening, setIsListening] = useState(false);
   const recognitionRef = useRef<any>(null);
+  const voiceInitializedRef = useRef(false);
 
   const { messages, sendMessage, isLoading, clearMessages } = usePBGChat();
+
+  // Prime the speech engine for mobile browsers (must be called on user interaction)
+  const initVoice = () => {
+    if (!voiceInitializedRef.current && typeof window !== "undefined" && window.speechSynthesis) {
+      const utterance = new SpeechSynthesisUtterance("");
+      utterance.volume = 0; // Silent
+      window.speechSynthesis.speak(utterance);
+      voiceInitializedRef.current = true;
+    }
+  };
 
   // Strips markdown symbols so TTS doesn't read them out loud
   const cleanForSpeech = (text: string): string => {
@@ -421,6 +432,7 @@ export default function ChatPage() {
   }, []);
 
   const toggleListening = () => {
+    initVoice();
     if (!recognitionRef.current) {
       alert("Browser Anda tidak mendukung fitur pengenalan suara.");
       return;
@@ -453,6 +465,7 @@ export default function ChatPage() {
   }, [inputValue]);
 
   const submitMessage = (text?: string) => {
+    initVoice();
     const msg = (text ?? inputValue).trim();
     if (!msg || isLoading) return;
     setInputValue("");
@@ -590,7 +603,10 @@ export default function ChatPage() {
 
           <div className="flex items-center gap-2">
             <button
-              onClick={() => setVoiceEnabled(!voiceEnabled)}
+              onClick={() => {
+                initVoice();
+                setVoiceEnabled(!voiceEnabled);
+              }}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs transition-all duration-200 hover:scale-105"
               style={{
                 background: voiceEnabled ? "rgba(129, 140, 248, 0.1)" : "var(--bg-input)",
