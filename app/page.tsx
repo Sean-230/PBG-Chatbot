@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { useTheme } from "next-themes";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import InteractiveDotBackground from "@/components/InteractiveDotBackground";
 import {
   Building2,
   Send,
@@ -21,6 +22,10 @@ import {
   Check,
   X,
   Trash2,
+  FileText,
+  Search,
+  Clock,
+  FolderOpen,
 } from "lucide-react";
 
 /* ────────────────────────────────────────────────────────────────────────── */
@@ -331,22 +336,23 @@ function MessageBubble({
 /* ────────────────────────────────────────────────────────────────────────── */
 function EmptyState({ onSuggest }: { onSuggest: (q: string) => void }) {
   const suggestions = [
-    "Apa syarat pengajuan PBG?",
-    "Bagaimana cek status permohonan?",
-    "Berapa lama proses PBG?",
-    "Dokumen apa yang dibutuhkan?",
+    { text: "Apa syarat pengajuan PBG?", icon: FileText },
+    { text: "Bagaimana cek status permohonan?", icon: Search },
+    { text: "Berapa lama proses PBG?", icon: Clock },
+    { text: "Dokumen apa yang dibutuhkan?", icon: FolderOpen },
   ];
 
   return (
-    <div className="flex flex-col items-center justify-center h-full gap-5 px-6 text-center">
+    <div className="flex flex-col items-center justify-center h-full gap-5 px-6 text-center relative">
+      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-72 h-72 bg-purple-500/10 rounded-full blur-[80px] pointer-events-none" />
       <div
-        className="w-16 h-16 rounded-2xl flex items-center justify-center"
+        className="w-16 h-16 rounded-2xl flex items-center justify-center relative z-10"
         style={{ background: "linear-gradient(135deg,#818cf8,#c084fc)" }}
       >
         <Building2 size={32} color="#fff" />
       </div>
-      <div>
-        <h2 className="text-xl font-semibold mb-1.5 gradient-text">
+      <div className="relative z-10">
+        <h2 className="text-3xl font-extrabold mb-2 bg-clip-text text-transparent bg-gradient-to-r from-indigo-400 via-purple-400 to-pink-500 drop-shadow-sm">
           PBG Assist siap membantu
         </h2>
         <p style={{ color: "var(--text-secondary)", fontSize: "0.875rem", maxWidth: "380px" }}>
@@ -354,27 +360,24 @@ function EmptyState({ onSuggest }: { onSuggest: (q: string) => void }) {
           Gedung, persyaratan dokumen, atau status permohonan Anda.
         </p>
       </div>
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-2 w-full max-w-md">
-        {suggestions.map((q) => (
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-4 w-full max-w-xl relative z-10">
+        {suggestions.map(({ text, icon: Icon }) => (
           <button
-            key={q}
-            onClick={() => onSuggest(q)}
-            className="text-left px-3.5 py-2.5 rounded-xl text-xs transition-all duration-200 hover:scale-[1.02]"
-            style={{
-              background: "var(--bg-surface)",
-              border: "1px solid var(--border)",
-              color: "var(--text-secondary)",
-            }}
+            key={text}
+            onClick={() => onSuggest(text)}
+            className="flex items-center gap-3 text-left px-4 py-3.5 rounded-2xl text-sm transition-all duration-300 hover:-translate-y-1 backdrop-blur-md bg-white/5 border border-white/10 hover:border-purple-400/50 hover:bg-white/10 hover:shadow-[0_0_15px_rgba(192,132,252,0.15)] group"
+            style={{ color: "var(--text-secondary)" }}
             onMouseEnter={(e) => {
-              (e.currentTarget as HTMLButtonElement).style.borderColor = "var(--accent)";
               (e.currentTarget as HTMLButtonElement).style.color = "var(--text-primary)";
             }}
             onMouseLeave={(e) => {
-              (e.currentTarget as HTMLButtonElement).style.borderColor = "var(--border)";
               (e.currentTarget as HTMLButtonElement).style.color = "var(--text-secondary)";
             }}
           >
-            {q}
+            <div className="flex-shrink-0 p-2 rounded-xl bg-purple-500/10 text-purple-400 group-hover:bg-purple-500/20 group-hover:scale-110 transition-all">
+              <Icon size={18} />
+            </div>
+            <span className="font-medium leading-tight">{text}</span>
           </button>
         ))}
       </div>
@@ -443,20 +446,14 @@ export default function ChatPage() {
   const backendOnline = useBackendHealth();
 
   // Hydration & Initial Load
+  // Always start with a fresh chat on page load/refresh.
+  // Previous sessions are loaded into the sidebar history for access.
   useEffect(() => {
     const loaded = loadAllSessions();
     setSessions(loaded);
-    if (loaded.length > 0) {
-      setActiveSessionId(loaded[0].id);
-      setMessages(loaded[0].messages);
-      
-      const lastMsg = loaded[0].messages[loaded[0].messages.length - 1];
-      if (lastMsg?.role === "assistant") {
-        setLastSpokenId(lastMsg.id);
-      }
-    } else {
-      setActiveSessionId(crypto.randomUUID());
-    }
+    // Always start a fresh chat — previous sessions live in history
+    setActiveSessionId(crypto.randomUUID());
+    setMessages([]);
     setMounted(true);
   }, [setMessages]);
 
@@ -820,13 +817,24 @@ export default function ChatPage() {
 
   return (
     <div
-      className="flex flex-col h-screen overflow-hidden"
+      className="flex flex-col h-screen overflow-hidden relative"
       style={{ background: "var(--bg-base)" }}
     >
+      {/* Background container that fades out when chat starts */}
+      <div 
+        className={`absolute inset-0 z-0 pointer-events-none transition-opacity duration-700 ease-in-out ${
+          mounted && messages.length > 0 ? "opacity-0" : "opacity-100"
+        }`}
+      >
+        <InteractiveDotBackground />
+      </div>
+      
+      {/* Interactive elements container (sits above background) */}
+      <div className="flex flex-col h-full w-full relative z-10">
       {/* ── Sticky Top Navigation Bar ── */}
       <header
-        className="flex items-center justify-between px-4 sm:px-6 py-3 flex-shrink-0 relative"
-        style={{ background: "var(--bg-surface)", borderBottom: "1px solid var(--border)" }}
+        className="sticky top-0 z-50 flex items-center justify-between px-4 sm:px-6 py-4 flex-shrink-0 backdrop-blur-lg bg-white/80 dark:bg-[#13161e]/80 shadow-sm"
+        style={{ borderBottom: "1px solid var(--border)" }}
       >
         {/* Left: Logo + Title */}
         <div className="flex items-center gap-3">
@@ -1082,14 +1090,11 @@ export default function ChatPage() {
       </div>
 
       {/* ── Input ── */}
-      <div
-        className="px-4 py-4 flex-shrink-0"
-        style={{ background: "var(--bg-surface)", borderTop: "1px solid var(--border)" }}
-      >
+      <div className="px-4 py-6 mb-4 flex-shrink-0 relative z-20">
         <div className="max-w-4xl mx-auto">
           <form
             onSubmit={handleFormSubmit}
-            className="flex items-end gap-3 rounded-2xl px-4 py-3 input-glow transition-all duration-200"
+            className="flex items-end gap-3 rounded-2xl px-4 py-3 shadow-xl transition-all duration-300 focus-within:ring-2 focus-within:ring-purple-500/50 focus-within:border-purple-500/50 backdrop-blur-md"
             style={{ background: "var(--bg-input)", border: "1px solid var(--border)" }}
           >
             <textarea
@@ -1178,6 +1183,7 @@ export default function ChatPage() {
           </div>
         </div>
       )}
+      </div>
     </div>
   );
 }
