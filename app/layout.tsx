@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import Providers from "./providers";
 
 export const metadata: Metadata = {
   title: "PBG Assist — Customer Support",
@@ -19,8 +20,10 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="id" className="h-full">
-      <body className="h-full antialiased">{children}</body>
+    <html lang="id" className="h-full" suppressHydrationWarning>
+      <body className="h-full antialiased">
+        <Providers>{children}</Providers>
+      </body>
     </html>
   );
 }

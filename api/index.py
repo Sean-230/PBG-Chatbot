@@ -2,7 +2,7 @@
 main.py — FastAPI Application Entry Point for the PBG Chatbot Backend.
 
 Start the server with:
-    uvicorn main:app --reload --port 8000
+    uvicorn api.index:app --reload --port 8000
 
 The POST /chat endpoint:
   - Accepts a conversation history in OpenAI-style format
@@ -159,13 +159,20 @@ async def generate_stream(messages: list[Message]) -> AsyncGenerator[str, None]:
     )
     rag_context = query_knowledge_base(last_user_question)
 
-    effective_system_prompt = SYSTEM_PROMPT
     if rag_context:
         effective_system_prompt = (
             f"{SYSTEM_PROMPT}\n\n"
-            "── Konteks dari Knowledge Base ──\n"
+            "=== KONTEKS DARI KNOWLEDGE BASE ===\n"
+            "Data DITEMUKAN. Berikut adalah kutipan dokumen resmi:\n"
             f"{rag_context}\n"
-            "── Akhir Konteks ──"
+            "==================================="
+        )
+    else:
+        effective_system_prompt = (
+            f"{SYSTEM_PROMPT}\n\n"
+            "=== KONTEKS DARI KNOWLEDGE BASE ===\n"
+            "Data TIDAK DITEMUKAN atau KOSONG untuk pertanyaan ini.\n"
+            "==================================="
         )
 
     # ── Build conversation history ───────────────────────────────────────────
@@ -239,6 +246,12 @@ async def generate_stream(messages: list[Message]) -> AsyncGenerator[str, None]:
 async def health_check():
     """Simple health check endpoint."""
     return {"status": "ok", "service": "PBG Assist Backend", "version": "0.1.0"}
+
+
+@app.get("/api/health", tags=["Health"])
+async def api_health():
+    """Health check endpoint accessible via the Next.js /api proxy."""
+    return {"status": "ok"}
 
 
 @app.post("/api/chat", tags=["Chat"])
