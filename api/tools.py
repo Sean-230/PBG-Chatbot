@@ -48,14 +48,29 @@ def check_pbg_status(registration_id: str) -> str:
         }, ensure_ascii=False)
 
     try:
-        # Use a tiny random vector to sample vectors broadly.
-        # Pinecone's ANN index returns 0 results for zero vectors.
-        import random
-        sample_vec = [random.uniform(-0.001, 0.001) for _ in range(768)]
+        try:
+            from rag_stub import _get_genai_client
+            client = _get_genai_client()
+            if not client:
+                raise ValueError("No Gemini client")
+            
+            from google import genai
+            response = client.models.embed_content(
+                model="gemini-embedding-001",
+                contents=f"Nomor pendaftaran {registration_id}",
+                config=genai.types.EmbedContentConfig(
+                    task_type="RETRIEVAL_QUERY",
+                    output_dimensionality=768,
+                ),
+            )
+            query_vector = response.embeddings[0].values
+        except Exception as exc:
+            import random
+            query_vector = [random.uniform(-0.001, 0.001) for _ in range(768)]
 
         results = index.query(
-            vector=sample_vec,
-            top_k=300,
+            vector=query_vector,
+            top_k=30,
             include_metadata=True,
         )
 

@@ -296,9 +296,15 @@ async def generate_stream(messages: list[Message]) -> AsyncGenerator[str, None]:
                     contents=contents_fallback,
                     config=gen_config_fallback,
                 )
+                has_text = False
                 for part in response.candidates[0].content.parts:
                     if part.text:
+                        has_text = True
                         yield f'0:{json.dumps(part.text)}\n'
+                
+                if not has_text:
+                    msg = "Mohon maaf, sistem sedang sibuk atau mengalami gangguan saat mencari data (fallback). Silakan coba lagi."
+                    yield f'0:{json.dumps(msg)}\n'
                 return
             except Exception as fallback_exc:
                 error_msg = str(fallback_exc)
