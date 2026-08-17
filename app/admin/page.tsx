@@ -147,7 +147,7 @@ export default function AdminDashboard() {
           <div className="space-y-4">
             <div>
               <label className="block text-xs font-medium text-zinc-400 mb-1.5">Email</label>
-              <input type="email" required value={email} onChange={e => setEmail(e.target.value)} className="w-full bg-[#0a0a0a] border border-zinc-800 text-sm text-zinc-200 rounded-lg px-4 py-2.5 focus:outline-none focus:border-indigo-500/50 transition-all" placeholder="admin@admin.com" />
+              <input type="email" required value={email} onChange={e => setEmail(e.target.value)} className="w-full bg-[#0a0a0a] border border-zinc-800 text-sm text-zinc-200 rounded-lg px-4 py-2.5 focus:outline-none focus:border-indigo-500/50 transition-all" placeholder="a@gmail.com" />
             </div>
             <div>
               <label className="block text-xs font-medium text-zinc-400 mb-1.5">Password</label>
