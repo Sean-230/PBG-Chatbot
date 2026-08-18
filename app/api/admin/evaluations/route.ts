@@ -39,7 +39,7 @@ export async function GET(request: NextRequest) {
           timestamp:
             raw.timestamp?.toDate?.()?.toISOString?.() ??
             String(raw.timestamp ?? ""),
-        };
+        } as any;
       })
       .sort((a, b) => (b.count ?? 0) - (a.count ?? 0));
 
