@@ -2,8 +2,9 @@
 
 import { useEffect, useState } from "react";
 import { Check, X, Clock, MessageSquare, Inbox, Search, AlertCircle, Bot, CheckCircle2, XCircle, Trash2, Lock, LogOut } from "lucide-react";
-import { auth } from "../../lib/firebase";
+import { auth, db } from "../../lib/firebase";
 import { signInWithEmailAndPassword, onAuthStateChanged, signOut, User } from "firebase/auth";
+import { collection, query, where, orderBy, getDocs, doc, updateDoc, deleteDoc, Timestamp } from "firebase/firestore";
 
 interface PendingEvaluation {
   id: string;
@@ -32,8 +33,6 @@ export default function AdminDashboard() {
   // Tabs: pending, answered
   const [activeTab, setActiveTab] = useState<"pending" | "answered">("pending");
 
-  const API_BASE = "http://localhost:8000";
-
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (u) => {
       setUser(u);
@@ -43,6 +42,7 @@ export default function AdminDashboard() {
       }
     });
     return () => unsubscribe();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab]);
 
   const handleLogin = async (e: React.FormEvent) => {
@@ -63,15 +63,38 @@ export default function AdminDashboard() {
     try {
       setLoading(true);
       setError("");
-      const res = await fetch(`${API_BASE}/api/admin/evaluations?status=${status}`);
-      if (!res.ok) throw new Error(`Failed to fetch ${status} evaluations`);
-      const json = await res.json();
-      setEvaluations(json.data || []);
-      if (json.data && json.data.length > 0) {
-        setSelectedId(json.data[0].id);
+
+      let docs;
+      if (status === "answered") {
+        const [snapApp, snapRej] = await Promise.all([
+          getDocs(query(collection(db, "pending_evaluations"), where("status", "==", "approved"), orderBy("count", "desc"))),
+          getDocs(query(collection(db, "pending_evaluations"), where("status", "==", "rejected"), orderBy("count", "desc"))),
+        ]);
+        const combined = [...snapApp.docs, ...snapRej.docs]
+          .map((d) => {
+            const data = d.data();
+            return {
+              ...data,
+              id: d.id,
+              timestamp: data.timestamp instanceof Timestamp ? data.timestamp.toDate().toISOString() : String(data.timestamp ?? ""),
+            } as PendingEvaluation;
+          })
+          .sort((a, b) => b.count - a.count);
+        docs = combined;
       } else {
-        setSelectedId(null);
+        const snap = await getDocs(query(collection(db, "pending_evaluations"), where("status", "==", status), orderBy("count", "desc")));
+        docs = snap.docs.map((d) => {
+          const data = d.data();
+          return {
+            ...data,
+            id: d.id,
+            timestamp: data.timestamp instanceof Timestamp ? data.timestamp.toDate().toISOString() : String(data.timestamp ?? ""),
+          } as PendingEvaluation;
+        });
       }
+
+      setEvaluations(docs);
+      setSelectedId(docs.length > 0 ? docs[0].id : null);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -81,25 +104,15 @@ export default function AdminDashboard() {
 
   const handleEvaluate = async (id: string, action: "approve" | "reject") => {
     try {
-      const res = await fetch(`${API_BASE}/api/admin/evaluate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ doc_id: id, action }),
-      });
-      if (!res.ok) throw new Error(`Failed to ${action}`);
-      
+      const newStatus = action === "approve" ? "approved" : "rejected";
+      await updateDoc(doc(db, "pending_evaluations", id), { status: newStatus });
+
       if (activeTab === "pending") {
-        // Remove from pending list
         const newEvals = evaluations.filter((item) => item.id !== id);
         setEvaluations(newEvals);
-        if (selectedId === id) {
-          setSelectedId(newEvals.length > 0 ? newEvals[0].id : null);
-        }
+        if (selectedId === id) setSelectedId(newEvals.length > 0 ? newEvals[0].id : null);
       } else {
-        // In Answered tab, just update the status locally
-        setEvaluations(prev => prev.map(item => 
-          item.id === id ? { ...item, status: `${action}ed` } : item
-        ));
+        setEvaluations((prev) => prev.map((item) => (item.id === id ? { ...item, status: newStatus } : item)));
       }
     } catch (err: any) {
       alert("Error: " + err.message);
@@ -109,16 +122,10 @@ export default function AdminDashboard() {
   const handleDelete = async (id: string) => {
     if (!confirm("Are you sure you want to permanently delete this record? The AI will completely forget this.")) return;
     try {
-      const res = await fetch(`${API_BASE}/api/admin/evaluate/${id}`, {
-        method: "DELETE",
-      });
-      if (!res.ok) throw new Error("Failed to delete");
-      
+      await deleteDoc(doc(db, "pending_evaluations", id));
       const newEvals = evaluations.filter((item) => item.id !== id);
       setEvaluations(newEvals);
-      if (selectedId === id) {
-        setSelectedId(newEvals.length > 0 ? newEvals[0].id : null);
-      }
+      if (selectedId === id) setSelectedId(newEvals.length > 0 ? newEvals[0].id : null);
     } catch (err: any) {
       alert("Error: " + err.message);
     }
