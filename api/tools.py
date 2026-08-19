@@ -19,7 +19,10 @@ HOW TO ADD A NEW TOOL
 
 import json
 import os
+from pathlib import Path
 from google.genai import types
+
+_HERE = str(Path(__file__).resolve().parent)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Tool Implementations
@@ -28,7 +31,7 @@ from google.genai import types
 def check_pbg_status(registration_id: str) -> str:
     """
     Checks the current status of a PBG application by searching the
-    TRANSAKSI data stored in Pinecone for the given registration number.
+    database locally for the given registration number.
 
     Args:
         registration_id: The No. Daftar / berkas number provided by the user.
@@ -36,82 +39,31 @@ def check_pbg_status(registration_id: str) -> str:
     Returns:
         A JSON string representing the found records, or a not-found message.
     """
-    import json
-    from rag_stub import _get_index
-
-    registration_id = registration_id.strip()
-    index = _get_index()
-
-    if index is None:
-        return json.dumps({
-            "status": "error",
-            "message": "Koneksi ke database tidak tersedia.",
-        }, ensure_ascii=False)
-
     try:
-        try:
-            from rag_stub import _get_genai_client
-            client = _get_genai_client()
-            if not client:
-                raise ValueError("No Gemini client")
-            
-            from google import genai
-            response = client.models.embed_content(
-                model="gemini-embedding-001",
-                contents=f"Nomor pendaftaran {registration_id}",
-                config=genai.types.EmbedContentConfig(
-                    task_type="RETRIEVAL_QUERY",
-                    output_dimensionality=768,
-                ),
-            )
-            query_vector = response.embeddings[0].values
-        except Exception as exc:
-            import random
-            query_vector = [random.uniform(-0.001, 0.001) for _ in range(768)]
-
-        results = index.query(
-            vector=query_vector,
-            top_k=30,
-            include_metadata=True,
-        )
-
-        matches = results.get("matches", [])
-
-        # Search for the registration number in the text of each chunk
-        found_records = []
-        for match in matches:
-            meta = match.get("metadata", {})
-            text = meta.get("text", "")
-            source = meta.get("source", "")
-
-            # Only look in TRANSAKSI tab
-            if "TRANSAKSI" not in source.upper():
-                continue
-
-            # Check if registration_id appears in the text (case-insensitive)
-            if registration_id in text or registration_id.lower() in text.lower():
-                found_records.append(text)
-
-        if not found_records:
+        import json
+        # Panggil fungsi search_local_csv yang baru kita buat
+        hasil_json = search_local_csv(registration_id)
+        
+        # Jika tidak ditemukan
+        if "Tidak ditemukan" in hasil_json:
             return json.dumps({
                 "registration_id": registration_id,
                 "status": "Tidak ditemukan",
-                "message": (
-                    f"Nomor daftar '{registration_id}' tidak ditemukan dalam database TRANSAKSI. "
-                    "Pastikan nomor yang Anda masukkan sudah benar."
-                ),
+                "message": f"Nomor daftar '{registration_id}' tidak ditemukan dalam database TRANSAKSI lokal."
             }, ensure_ascii=False)
-
+            
+        # Kembalikan hasil mentah dari pencarian CSV
         return json.dumps({
             "registration_id": registration_id,
             "status": "Ditemukan",
-            "records": found_records,
+            "history": json.loads(hasil_json) if hasil_json.startswith("[") else hasil_json
         }, ensure_ascii=False)
 
     except Exception as exc:
+        import json
         return json.dumps({
             "status": "error",
-            "message": f"Terjadi kesalahan saat mengakses database: {exc}",
+            "message": f"Terjadi kesalahan saat mengakses database lokal: {exc}",
         }, ensure_ascii=False)
 
 def check_brangkas(registration_id: str) -> str:
@@ -302,19 +254,32 @@ def search_local_csv(query: str) -> str:
                 for row in reader:
                     # Gabungkan semua value di row ini menjadi satu string untuk dicari
                     row_content = " ".join([str(v).lower() for v in row.values() if v])
-                    if query_lower in row_content:
+                    # Prioritaskan exact match untuk No Daftar jika ada
+                    is_match = False
+                    if query_lower == str(row.get("No Daftar", "")).lower().strip():
+                        is_match = True
+                    elif query_lower in row_content:
+                        is_match = True
+                        
+                    if is_match:
                         # Clean up row (remove empty keys/values)
                         clean_row = {k: v for k, v in row.items() if k and v and str(v).strip()}
                         clean_row["_source"] = file_label
                         results.append(clean_row)
                         
-                        # Batasi hasil agar tidak meledakkan token (max 10 hasil)
-                        if len(results) >= 15:
-                            return json.dumps(results, indent=2, ensure_ascii=False) + "\n(Ada lebih banyak hasil, tapi dibatasi 15 untuk menghemat memori. Berikan kata kunci lebih spesifik.)"
+                        # Batasi hasil agar tidak meledakkan token (max 50 hasil)
+                        if len(results) >= 50:
+                            results.append({"_warning": "Ada lebih banyak hasil, tapi dibatasi 50 untuk menghemat memori. Tampilkan yang ada."})
+                            return json.dumps(results, indent=2, ensure_ascii=False)
         except Exception as e:
             pass # ignore errors gracefully
             
     if not results:
         return f"Tidak ditemukan data untuk kata kunci '{query}' di database lokal."
+        
+    # Filter exact matches if they exist
+    exact_matches = [r for r in results if str(r.get("No Daftar", "")).lower().strip() == query_lower]
+    if exact_matches:
+        results = exact_matches
         
     return json.dumps(results, indent=2, ensure_ascii=False)
