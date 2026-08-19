@@ -40,7 +40,6 @@ def check_pbg_status(registration_id: str) -> str:
         A JSON string representing the found records, or a not-found message.
     """
     try:
-        import json
         # Panggil fungsi search_local_csv yang baru kita buat
         hasil_json = search_local_csv(registration_id)
         
@@ -60,7 +59,6 @@ def check_pbg_status(registration_id: str) -> str:
         }, ensure_ascii=False)
 
     except Exception as exc:
-        import json
         return json.dumps({
             "status": "error",
             "message": f"Terjadi kesalahan saat mengakses database lokal: {exc}",
@@ -83,7 +81,6 @@ def check_brangkas(registration_id: str) -> str:
     try:
         creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
         if creds_json:
-            import json
             creds_dict = json.loads(creds_json)
             creds = service_account.Credentials.from_service_account_info(
                 creds_dict, scopes=['https://www.googleapis.com/auth/drive.readonly']

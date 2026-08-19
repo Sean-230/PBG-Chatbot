@@ -6,7 +6,7 @@ import path from "path";
 let app: App;
 
 if (!getApps().length) {
-  const serviceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+  const serviceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_CREDENTIALS_JSON;
 
   if (serviceAccountJson) {
     // Vercel / production: credentials stored as env var
