@@ -14,9 +14,10 @@ The POST /chat endpoint:
 import json
 import logging
 import asyncio
-from typing import AsyncGenerator
+import threading
+from typing import AsyncGenerator, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -59,7 +60,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -125,7 +126,17 @@ class ChatRequest(BaseModel):
 
 class EvaluateRequest(BaseModel):
     doc_id: str
-    action: str
+    action: str  # "inject_kb" or "spam"
+    admin_note: Optional[str] = None
+    official_answer: Optional[str] = None
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Golden Chunk Retrieval  (Admin-approved HITL knowledge)
+# ──────────────────────────────────────────────────────────────────────────────
+
+# (Golden Chunks are now fetched directly via Pinecone in rag_stub.py)
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # AI Interceptor & Smart Deduplication
@@ -142,53 +153,156 @@ def save_pending_json(data):
     with open(PENDING_FILE, "w") as f:
         json.dump(data, f, indent=2)
 
-async def intercept_and_log(user_query: str, ai_response: str):
+async def intercept_and_log(user_query: str, ai_response: str, golden_chunk_used: bool = False):
     """
-    Background task to intercept Scenario 2 and Scenario 3 responses,
-    generate a topic slug, and save/update.
-    """
-    ai_response_stripped = ai_response.strip()
-    is_scenario_2 = ai_response_stripped.startswith("Berdasarkan informasi dari panduan resmi")
-    is_scenario_3 = ai_response_stripped.startswith("Secara umum terkait pedoman perizinan bangunan")
+    Background task that classifies the AI response into one of 4 scenarios
+    and logs Scenario 2, 3, and 4 responses to Firestore for admin review.
+    
+    If golden_chunk_used is True, this query was already guided by an admin-approved
+    instruction, so we skip logging to avoid evaluating the same case repeatedly.
 
-    if not (is_scenario_2 or is_scenario_3):
+    Classification strategy (order matters — most specific first):
+      - Scenario 1 (RAG hit):  Response starts with the definitive RAG prefix.
+                               These are correct answers — do NOT log.
+      - Scenario 2 (Web):      Response contains a URL / web-grounding phrases.
+      - Scenario 3 (Fallback): Response contains general-knowledge fallback phrases.
+      - Scenario 4 (OOT):      Response contains apology/refusal phrases.
+      - Catch-all:             Anything that isn't Scenario 1 gets logged as
+                               Scenario 3 (safe default — better to over-log).
+    """
+    if golden_chunk_used:
+        logger.debug("Interceptor: Golden Chunk used — skipping log.")
         return
 
-    scenario_name = "Scenario 2 (External Web)" if is_scenario_2 else "Scenario 3 (General AI Knowledge)"
-    logger.info(f"Intercepted {scenario_name} response. Extracting topic...")
+    ai_response_stripped = ai_response.strip()
+    response_lower = ai_response_stripped.lower()
+
+    # ── Scenario 1 anchors — exact prefixes the prompt instructs the LLM to use
+    # If ANY of these match, the LLM answered from the RAG DB → skip logging.
+    SCENARIO_1_PREFIXES = (
+        "berdasarkan informasi resmi dari database",
+        "berdasarkan data resmi",
+        "berdasarkan dokumen resmi",
+        "berdasarkan ketentuan resmi",
+        "berdasarkan persyaratan resmi",
+    )
+    is_scenario_1 = any(
+        response_lower.startswith(prefix) for prefix in SCENARIO_1_PREFIXES
+    )
+
+    if is_scenario_1:
+        logger.debug("Interceptor: Scenario 1 (RAG hit) — skipping log.")
+        return
+
+    # ── Scenario 2 signals — web/external grounding
+    SCENARIO_2_SIGNALS = (
+        "berdasarkan informasi dari panduan resmi",
+        "berdasarkan informasi dari situs",
+        "berdasarkan informasi dari website",
+        "berdasarkan sumber eksternal",
+        "http://",
+        "https://",
+        "www.",
+    )
+    is_scenario_2 = any(signal in response_lower for signal in SCENARIO_2_SIGNALS)
+
+    # ── Scenario 3 signals — general AI knowledge fallback
+    SCENARIO_3_SIGNALS = (
+        "secara umum terkait pedoman perizinan",
+        "secara umum,",
+        "secara umum ",
+        "berdasarkan pengetahuan umum",
+        "berdasarkan informasi umum",
+    )
+    is_scenario_3 = (not is_scenario_2) and any(
+        signal in response_lower for signal in SCENARIO_3_SIGNALS
+    )
+
+    # ── Scenario 4 signals — OOT / refusal / apology
+    # Catches variations like "Mohon maaf, sebagai PBG Assist..."
+    #                      and "Mohon maaf, saya adalah PBG Assist..."
+    SCENARIO_4_SIGNALS = (
+        "mohon maaf",
+        "maaf, sebagai",
+        "maaf, saya",
+        "pertanyaan anda di luar",
+        "pertanyaan ini di luar",
+        "di luar cakupan",
+        "tidak dapat membantu",
+        "bukan dalam lingkup",
+    )
+    is_scenario_4 = (not is_scenario_2 and not is_scenario_3) and any(
+        signal in response_lower for signal in SCENARIO_4_SIGNALS
+    )
+
+    # ── Catch-all: anything not Scenario 1 gets logged ───────────────────────
+    # This is the safety net recommended in the brief: if it didn't match the
+    # RAG prefix, it's an uncertain / improvised response that needs admin review.
+    if not (is_scenario_2 or is_scenario_3 or is_scenario_4):
+        is_scenario_3 = True  # Default to Scenario 3 — safest label for unknowns
+
+    # ── Resolve scenario name ────────────────────────────────────────────────
+    if is_scenario_2:
+        scenario_name = "Scenario 2 (External Web)"
+    elif is_scenario_4:
+        scenario_name = "Scenario 4 (OOT)"
+    else:
+        scenario_name = "Scenario 3 (General AI Knowledge)"
+
+    logger.info(f"Interceptor: classified as {scenario_name}. Extracting topic...")
 
     try:
-        # Lightweight LLM call
+        # Fetch existing pending topics to help LLM deduplicate
+        existing_topics = []
+        if db:
+            try:
+                # We do this synchronously in a thread
+                def get_topics():
+                    return [d.to_dict().get("topic") for d in db.collection("pending_evaluations").where("status", "==", "pending").get()]
+                existing_topics = await asyncio.to_thread(get_topics)
+                existing_topics = list(set([t for t in existing_topics if t]))
+            except Exception as e:
+                logger.warning(f"Could not fetch existing topics for dedup: {e}")
+
+        topics_str = ", ".join(existing_topics) if existing_topics else "None"
+        
+        # Lightweight LLM call to extract a topic slug, guiding it to reuse existing ones
         gen_config = types.GenerateContentConfig(
-            system_instruction="You are a text extractor. Extract a 1-3 word topic slug from the user's query. Use lowercase and underscores for spaces (e.g., 'syarat_sirkus'). Do not output anything else.",
+            system_instruction=(
+                "You are a deduplication router. The user has a query.\n"
+                f"Existing pending topics: [{topics_str}]\n\n"
+                "If the user's query semantically matches an existing topic (e.g. 'cara urus akte lahir' matches 'pembuatan_akte_lahir'), "
+                "you MUST output exactly that existing topic.\n"
+                "If it does NOT match, generate a NEW 1-3 word topic slug using lowercase and underscores (e.g., 'syarat_sirkus').\n"
+                "Output ONLY the topic string and nothing else."
+            ),
             temperature=0.1,
-            max_output_tokens=10
+            max_output_tokens=15
         )
         topic_resp = client.models.generate_content(
             model=GEMINI_MODEL,
             contents=user_query,
             config=gen_config
         )
-        
+
         topic_slug = topic_resp.text.strip().lower().replace(" ", "_")
         if not topic_slug:
             topic_slug = "unknown_topic"
-            
-        logger.info(f"Topic extracted: {topic_slug}")
 
-        # Fallback to local JSON if Firebase is broken
+        logger.info(f"Topic extracted: {topic_slug} (from existing: {topic_slug in existing_topics})")
+
+        # ── Firestore write (with JSON fallback) ─────────────────────────────
         def fallback_ops():
             import uuid
             import datetime
             data = load_pending_json()
-            
-            # Find existing
+
             existing_id = None
             for doc_id, doc in data.items():
                 if doc.get("status") == "pending" and doc.get("topic") == topic_slug:
                     existing_id = doc_id
                     break
-                    
+
             if existing_id:
                 data[existing_id]["queries"].append(user_query)
                 data[existing_id]["count"] += 1
@@ -207,19 +321,24 @@ async def intercept_and_log(user_query: str, ai_response: str):
                 logger.info(f"Created local JSON for topic: {topic_slug}")
             save_pending_json(data)
 
-        # Use Firebase if connected, otherwise use JSON fallback
         if db:
             def firestore_ops():
                 pending_ref = db.collection("pending_evaluations")
-                query = pending_ref.where("status", "==", "pending").where("topic", "==", topic_slug).limit(1)
+                query = (
+                    pending_ref
+                    .where("status", "==", "pending")
+                    .where("topic", "==", topic_slug)
+                    .limit(1)
+                )
                 docs = query.get()
-                
+
                 if docs:
                     doc = docs[0]
                     doc.reference.update({
                         "queries": firestore.ArrayUnion([user_query]),
                         "count": firestore.Increment(1)
                     })
+                    logger.info(f"Firestore: incremented count for topic '{topic_slug}'")
                 else:
                     pending_ref.add({
                         "topic": topic_slug,
@@ -230,10 +349,11 @@ async def intercept_and_log(user_query: str, ai_response: str):
                         "status": "pending",
                         "scenario": scenario_name
                     })
+                    logger.info(f"Firestore: created new doc for topic '{topic_slug}'")
             try:
                 await asyncio.to_thread(firestore_ops)
             except Exception as e:
-                logger.error(f"Firestore deduplication failed, using JSON fallback: {e}")
+                logger.error(f"Firestore write failed, using JSON fallback: {e}")
                 await asyncio.to_thread(fallback_ops)
         else:
             await asyncio.to_thread(fallback_ops)
@@ -242,6 +362,7 @@ async def intercept_and_log(user_query: str, ai_response: str):
         logger.error(f"Error in interceptor: {e}")
 
 # ──────────────────────────────────────────────────────────────────────────────
+
 # Helpers
 # ──────────────────────────────────────────────────────────────────────────────
 def build_gemini_history(messages: list[Message]) -> list[types.Content]:
@@ -314,7 +435,29 @@ async def generate_stream(messages: list[Message]) -> AsyncGenerator[str, None]:
     last_user_question = next(
         (m.get_text for m in reversed(messages) if m.role == "user"), ""
     )
-    rag_context = query_knowledge_base(last_user_question)
+    
+    # query_knowledge_base now returns both the RAG text and intercepted Golden Chunks from Pinecone!
+    def fetch_rag():
+        return query_knowledge_base(last_user_question)
+        
+    rag_context, golden_chunks = await asyncio.to_thread(fetch_rag)
+
+    # Build the golden-chunk prompt block if any matches were found
+    if golden_chunks:
+        golden_block_lines = [
+            "=== INSTRUKSI KHUSUS DARI ADMIN (PRIORITAS TERTINGGI) ===",
+            "Berikut adalah instruksi dari admin untuk pertanyaan serupa dengan yang ditanyakan user.",
+            "IKUTI instruksi ini dengan KETAT saat menyusun jawabanmu.\n",
+        ]
+        for i, chunk in enumerate(golden_chunks, 1):
+            golden_block_lines.append(f"[Instruksi Admin #{i} — Topik: {chunk['topic']}]")
+            if chunk["admin_note"]:
+                golden_block_lines.append(f"📋 Instruksi: {chunk['admin_note']}")
+            golden_block_lines.append("")
+        golden_block_lines.append("=" * 60)
+        golden_prompt_block = "\n".join(golden_block_lines) + "\n\n"
+    else:
+        golden_prompt_block = ""
 
     triage_rules = (
         "=== ATURAN ATRIBUSI SUMBER & CARA MENJAWAB (WAJIB MUTLAK) ===\n\n"
@@ -343,6 +486,7 @@ async def generate_stream(messages: list[Message]) -> AsyncGenerator[str, None]:
     if rag_context:
         effective_system_prompt = (
             f"{SYSTEM_PROMPT}\n\n"
+            f"{golden_prompt_block}"
             f"{triage_rules}"
             "=== KONTEKS DARI KNOWLEDGE BASE ===\n"
             "Data DITEMUKAN. Berikut adalah kutipan dokumen resmi:\n"
@@ -353,6 +497,7 @@ async def generate_stream(messages: list[Message]) -> AsyncGenerator[str, None]:
     else:
         effective_system_prompt = (
             f"{SYSTEM_PROMPT}\n\n"
+            f"{golden_prompt_block}"
             f"{triage_rules}"
             "=== KONTEKS DARI KNOWLEDGE BASE ===\n"
             "Data TIDAK DITEMUKAN atau KOSONG untuk pertanyaan ini.\n"
@@ -418,7 +563,7 @@ async def generate_stream(messages: list[Message]) -> AsyncGenerator[str, None]:
 
             if not has_tool_call:
                 # No tool was called; generation is complete.
-                asyncio.create_task(intercept_and_log(last_user_question, final_response_text))
+                asyncio.create_task(intercept_and_log(last_user_question, final_response_text, bool(golden_chunks)))
                 break
         else:
             msg = "\n[Sistem: Terlalu banyak pemanggilan tool. Silakan coba lagi.]"
@@ -456,7 +601,7 @@ async def generate_stream(messages: list[Message]) -> AsyncGenerator[str, None]:
                     msg = "Mohon maaf, sistem sedang sibuk atau mengalami gangguan saat mencari data (fallback). Silakan coba lagi."
                     yield f'0:{json.dumps(msg)}\n'
                 else:
-                    asyncio.create_task(intercept_and_log(last_user_question, final_response_text))
+                    asyncio.create_task(intercept_and_log(last_user_question, final_response_text, bool(golden_chunks)))
                 return
             except Exception as fallback_exc:
                 error_msg = str(fallback_exc)
@@ -483,18 +628,6 @@ async def generate_stream(messages: list[Message]) -> AsyncGenerator[str, None]:
             yield f'0:{json.dumps(msg)}\n'
 
 # ──────────────────────────────────────────────────────────────────────────────
-# API Endpoints
-# ──────────────────────────────────────────────────────────────────────────────
-@app.get("/", tags=["Health"])
-async def health_check():
-    """Simple health check endpoint."""
-    return {"status": "ok", "service": "PBG Assist Backend", "version": "0.1.0"}
-
-
-@app.get("/api/health", tags=["Health"])
-async def api_health():
-    """Health check endpoint accessible via the Next.js /api proxy."""
-    return {"status": "ok"}
 
 
 @app.post("/api/chat", tags=["Chat"])
@@ -556,10 +689,23 @@ async def delete_evaluation(doc_id: str):
     """Permanently delete an evaluation."""
     try:
         def do_delete():
+            success = False
             if db:
                 db.collection("pending_evaluations").document(doc_id).delete()
-                return True
-            return False
+                success = True
+            
+            # Delete from Pinecone
+            from .rag_stub import _get_index
+            index = _get_index()
+            if index:
+                try:
+                    index.delete(ids=[f"golden_{doc_id}"])
+                    logger.info(f"[GoldenChunk] Deleted vector golden_{doc_id} from Pinecone.")
+                except Exception as e:
+                    logger.warning(f"[GoldenChunk] Failed to delete vector from Pinecone: {e}")
+                    
+            return success
+            
         success = await asyncio.to_thread(do_delete)
         if not success:
             raise HTTPException(status_code=404, detail="Document not found.")
@@ -572,30 +718,89 @@ async def delete_evaluation(doc_id: str):
 
 @app.post("/api/admin/evaluate", tags=["Admin"])
 async def evaluate_pending(req: EvaluateRequest):
-    """Approve or reject a pending evaluation."""
-    if req.action not in ["approve", "reject"]:
-        raise HTTPException(status_code=400, detail="Invalid action. Use 'approve' or 'reject'.")
-        
+    """Resolve a pending evaluation by coaching the AI or marking as spam."""
+    if req.action not in ["inject_kb", "spam"]:
+        raise HTTPException(status_code=400, detail="Invalid action. Use 'inject_kb' or 'spam'.")
+
     try:
         def update():
-            if db:
-                doc_ref = db.collection("pending_evaluations").document(req.doc_id)
-                doc = doc_ref.get()
-                if not doc.exists:
-                    return False
-                new_status = "approved" if req.action == "approve" else "rejected"
-                doc_ref.update({"status": new_status})
-                return True
-            else:
+            if not db:
+                return None
+            doc_ref = db.collection("pending_evaluations").document(req.doc_id)
+            doc = doc_ref.get()
+            if not doc.exists:
                 return False
+
+            if req.action == "spam":
+                doc_ref.update({"status": "rejected"})
+                return {"action": "spam"}
+
+            # ── inject_kb ──────────────────────────────────────────────────────
+            data = doc.to_dict() or {}
+            user_queries: list = data.get("queries", [])
+            topic: str = data.get("topic", "Topik Khusus")
+
+            golden_chunk = (
+                f"PERTANYAAN: {' / '.join(user_queries)} | "
+                f"INSTRUKSI ADMIN: {req.admin_note or ''} | "
+                f"JAWABAN RESMI: {req.official_answer or ''}"
+            )
+
+            # Upload to Pinecone for Vector Search RAG
+            from .rag_stub import _get_index, _get_genai_client, EMBEDDING_MODEL
+            from google import genai
             
-        success = await asyncio.to_thread(update)
-        if not success:
+            client = _get_genai_client()
+            index = _get_index()
+            
+            if client and index:
+                try:
+                    response = client.models.embed_content(
+                        model=EMBEDDING_MODEL,
+                        contents=golden_chunk,
+                        config=genai.types.EmbedContentConfig(
+                            task_type="RETRIEVAL_DOCUMENT",
+                            output_dimensionality=768,
+                        ),
+                    )
+                    vector = response.embeddings[0].values
+                    
+                    index.upsert(vectors=[
+                        {
+                            "id": f"golden_{req.doc_id}",
+                            "values": vector,
+                            "metadata": {
+                                "type": "golden_chunk",
+                                "topic": topic,
+                                "text": golden_chunk,
+                                "doc_id": req.doc_id
+                            }
+                        }
+                    ])
+                    logger.info(f"[GoldenChunk] Upserted vector golden_{req.doc_id} to Pinecone.")
+                except Exception as e:
+                    logger.error(f"[GoldenChunk] Failed to upload vector to Pinecone: {e}")
+
+            doc_ref.update({
+                "status": "approved",
+                "admin_note": req.admin_note,
+                "official_answer": req.official_answer,
+                "golden_chunk": golden_chunk,
+            })
+
+            return {"action": "inject_kb", "golden_chunk": golden_chunk}
+
+        result = await asyncio.to_thread(update)
+        if result is False:
             raise HTTPException(status_code=404, detail="Document not found.")
-            
-        return {"status": "success", "action": f"{req.action}d", "id": req.doc_id}
+        if result is None:
+            raise HTTPException(status_code=503, detail="Database unavailable.")
+
+        return {"status": "success", **result, "id": req.doc_id}
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error updating evaluation: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+

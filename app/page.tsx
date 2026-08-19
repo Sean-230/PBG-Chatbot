@@ -345,11 +345,8 @@ function EmptyState({ onSuggest }: { onSuggest: (q: string) => void }) {
   return (
     <div className="flex flex-col items-center justify-center h-full gap-5 px-6 text-center relative">
       <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-72 h-72 bg-purple-500/10 rounded-full blur-[80px] pointer-events-none" />
-      <div
-        className="w-16 h-16 rounded-2xl flex items-center justify-center relative z-10"
-        style={{ background: "linear-gradient(135deg,#818cf8,#c084fc)" }}
-      >
-        <Building2 size={32} color="#fff" />
+      <div className="flex items-center justify-center relative z-10">
+        <img src="/logo-pemkot.png" alt="Pemkot Logo" className="h-24 w-auto object-contain drop-shadow-xl" />
       </div>
       <div className="relative z-10">
         <h2 className="text-3xl font-extrabold mb-2 bg-clip-text text-transparent bg-gradient-to-r from-indigo-400 via-purple-400 to-pink-500 drop-shadow-sm">
@@ -838,14 +835,8 @@ export default function ChatPage() {
       >
         {/* Left: Logo + Title */}
         <div className="flex items-center gap-3">
-          <div
-            className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0"
-            style={{ background: "linear-gradient(135deg,#818cf8,#c084fc)" }}
-          >
-            <Building2 size={18} color="#fff" />
-          </div>
+          <img src="/logo-pemkot.png" alt="Pemkot Logo" className="h-9 w-auto object-contain flex-shrink-0 drop-shadow-sm" />
           <div className="flex items-center gap-2">
-            <MessageSquare size={16} style={{ color: "var(--accent)" }} />
             <span className="font-semibold text-sm" style={{ color: "var(--text-primary)" }}>
               PBG Customer Support
             </span>

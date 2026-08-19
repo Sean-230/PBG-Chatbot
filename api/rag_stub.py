@@ -95,32 +95,31 @@ def _get_genai_client():
 # Public API
 # ──────────────────────────────────────────────────────────────────────────────
 
-def query_knowledge_base(question: str) -> str:
+def query_knowledge_base(question: str) -> tuple[str, list[dict]]:
     """
     Retrieves relevant context from the PBG knowledge base for a given question.
 
     Embeds the question with Gemini, queries ChromaDB for similar chunks, filters
     by similarity threshold, and returns a formatted context string ready to be
-    injected into the Gemini system prompt.
+    injected into the Gemini system prompt, alongside any matched Golden Chunks.
 
     Args:
         question: The user's natural-language question (in Indonesian).
 
     Returns:
-        A formatted string of the most relevant document excerpts,
-        or an empty string if nothing relevant is found or RAG is unavailable.
+        A tuple: (context_string, list_of_golden_chunks)
     """
     if not question.strip():
-        return ""
+        return "", []
 
     # --- Check prerequisites ------------------------------------------------
     index = _get_index()
     if index is None:
-        return ""
+        return "", []
 
     client = _get_genai_client()
     if client is None:
-        return ""
+        return "", []
 
     # --- Embed the query ----------------------------------------------------
     try:
@@ -139,7 +138,7 @@ def query_knowledge_base(question: str) -> str:
 
     except Exception as exc:
         logger.error("[RAG] Failed to embed query: %s", exc)
-        return ""
+        return "", []
 
     # --- Query Pinecone -----------------------------------------------------
     try:
@@ -150,7 +149,7 @@ def query_knowledge_base(question: str) -> str:
         )
     except Exception as exc:
         logger.error("[RAG] Pinecone query failed: %s", exc)
-        return ""
+        return "", []
 
     # --- Smart intent detection: which sheet tab is relevant? ------------------
     # Keywords that signal the user is asking about REQUIREMENTS (SYARAT tab)
@@ -173,20 +172,33 @@ def query_knowledge_base(question: str) -> str:
     matches = results.get("matches", [])
 
     if not matches:
-        return ""
+        return "", []
 
     # Pinecone returns 'score' which is equivalent to cosine similarity
     # Build two buckets: preferred (matches intent) and fallback (everything else)
     preferred_parts: list[str] = []
     fallback_parts:  list[str] = []
+    golden_chunks:   list[dict] = []
 
     for match in matches:
         similarity = match.get("score", 0.0)
+        meta = match.get("metadata", {})
+        doc_text = meta.get("text", "")
+        
+        # Intercept Golden Chunks immediately
+        if meta.get("type") == "golden_chunk":
+            # Semantic search can match loosely, so we require a small similarity threshold (e.g. 0.3)
+            # We can use MIN_SIMILARITY - 0.1 for leniency, or just MIN_SIMILARITY
+            if similarity >= (MIN_SIMILARITY - 0.05):
+                golden_chunks.append({
+                    "topic": meta.get("topic", "Topik Khusus"),
+                    "admin_note": doc_text
+                })
+            continue
+
         if similarity < MIN_SIMILARITY:
             continue
             
-        meta = match.get("metadata", {})
-        doc_text = meta.get("text", "")
         source = meta.get("source", "Dokumen PBG")
         entry  = f"--- Sumber: {source} (relevansi: {similarity:.0%}) ---\n{doc_text}"
 
@@ -207,18 +219,18 @@ def query_knowledge_base(question: str) -> str:
     # Limit total context to avoid overloading the model's context window
     context_parts = context_parts[:20]
 
-    if not context_parts:
+    if not context_parts and not golden_chunks:
         logger.info(
             "[RAG] No chunks above threshold %.2f for: '%s'",
             MIN_SIMILARITY, question[:80]
         )
-        return ""
+        return "", []
 
     logger.info(
-        "[RAG] Retrieved %d chunk(s) (%d preferred, %d fallback) for: '%s'",
-        len(context_parts), len(preferred_parts), len(fallback_parts), question[:80],
+        "[RAG] Retrieved %d chunk(s) (%d preferred, %d fallback) and %d golden chunk(s) for: '%s'",
+        len(context_parts), len(preferred_parts), len(fallback_parts), len(golden_chunks), question[:80],
     )
-    return "\n\n".join(context_parts)
+    return "\n\n".join(context_parts), golden_chunks
 
 
 def ingest_documents_from_drive(folder_id: str) -> None:

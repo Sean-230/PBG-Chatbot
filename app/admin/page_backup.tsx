@@ -55,17 +55,59 @@ export default function AdminDashboard() {
   const [password, setPassword] = useState("");
   const [loginError, setLoginError] = useState("");
 
-  const [pendingEvaluations, setPendingEvaluations] = useState<PendingEvaluation[]>([]);
-  const [answeredEvaluations, setAnsweredEvaluations] = useState<PendingEvaluation[]>([]);
+  const [evaluations, setEvaluations] = useState<PendingEvaluation[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
 
   // Tabs
-  const [activeTab, setActiveTab] = useState<"unanswered" | "answered">("unanswered");
+  const [activeTab, setActiveTab] = useState<"pending" | "answered">("pending");
 
-  // Sync state removed
+  // Sync state
+  const [syncing, setSyncing] = useState(false);
+  const [syncProgress, setSyncProgress] = useState(0);
+  const [syncStatus, setSyncStatus] = useState("");
+
+  const startSync = () => {
+    if (syncing) return;
+    setSyncing(true);
+    setSyncProgress(0);
+    setSyncStatus("Starting Pinecone sync...");
+
+    const eventSource = new EventSource(
+      process.env.NODE_ENV === "development" 
+        ? "http://localhost:8000/api/sync-kb/stream" 
+        : "/api/sync-kb/stream"
+    );
+
+    eventSource.onmessage = (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        setSyncProgress(data.progress || 0);
+        setSyncStatus(data.status || "");
+
+        if (data.is_done) {
+          eventSource.close();
+          setSyncing(false);
+          if (data.error) {
+            showToast("Sync Error: " + data.status, "error");
+          } else {
+            const sum = data.summary || {};
+            showToast(`✓ Sync Complete! Added: ${sum.added || 0}, Updated: ${sum.updated || 0}`, "success");
+          }
+        }
+      } catch (err) {
+        console.error("Failed to parse SSE data:", err);
+      }
+    };
+
+    eventSource.onerror = (e) => {
+      eventSource.close();
+      setSyncing(false);
+      showToast("Connection to sync server lost.", "error");
+    };
+  };
 
   // Coaching form state — keyed by evaluation id
   const [coachFormOpen, setCoachFormOpen] = useState<string | null>(null);
@@ -81,12 +123,12 @@ export default function AdminDashboard() {
       setUser(u);
       setAuthLoading(false);
       if (u) {
-        fetchEvaluations();
+        fetchEvaluations(activeTab);
       }
     });
     return () => unsubscribe();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [activeTab]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -102,25 +144,15 @@ export default function AdminDashboard() {
     }
   };
 
-  async function fetchEvaluations() {
+  const fetchEvaluations = async (status: string) => {
     try {
       setLoading(true);
       setError("");
-      const [pendingRes, answeredRes] = await Promise.all([
-        fetch(`/api/admin/evaluations?status=pending`),
-        fetch(`/api/admin/evaluations?status=answered`)
-      ]);
-      const pendingData = await pendingRes.json();
-      const answeredData = await answeredRes.json();
-      
-      setPendingEvaluations(pendingData.data || []);
-      setAnsweredEvaluations(answeredData.data || []);
-      
-      if (pendingData.data && pendingData.data.length > 0) {
-        setSelectedId(pendingData.data[0].id);
-      } else if (answeredData.data && answeredData.data.length > 0) {
-        setSelectedId(answeredData.data[0].id);
-      }
+      const res = await fetch(`/api/admin/evaluations?status=${status}`);
+      if (!res.ok) throw new Error(`Failed to fetch ${status} evaluations`);
+      const json = await res.json();
+      setEvaluations(json.data || []);
+      setSelectedId(json.data?.length > 0 ? json.data[0].id : null);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -173,13 +205,12 @@ export default function AdminDashboard() {
       });
       if (!res.ok) throw new Error("Failed to inject into knowledge base");
 
-      if (pendingEvaluations.find(e => e.id === evalItem.id)) {
-        const newPending = pendingEvaluations.filter((e) => e.id !== evalItem.id);
-        setPendingEvaluations(newPending);
-        setAnsweredEvaluations([{...evalItem, status: "approved", admin_note: form.adminNote}, ...answeredEvaluations]);
-        setSelectedId(newPending.length > 0 ? newPending[0].id : null);
+      if (activeTab === "pending") {
+        const newEvals = evaluations.filter((e) => e.id !== evalItem.id);
+        setEvaluations(newEvals);
+        setSelectedId(newEvals.length > 0 ? newEvals[0].id : null);
       } else {
-        setAnsweredEvaluations((prev) =>
+        setEvaluations((prev) =>
           prev.map((e) =>
             e.id === evalItem.id
               ? { ...e, status: "approved", admin_note: form.adminNote }
@@ -206,17 +237,9 @@ export default function AdminDashboard() {
       });
       if (!res.ok) throw new Error("Failed to mark as spam");
 
-      const target = pendingEvaluations.find(e => e.id === id);
-      if (target) {
-        const newPending = pendingEvaluations.filter((e) => e.id !== id);
-        setPendingEvaluations(newPending);
-        setAnsweredEvaluations([{...target, status: "rejected"}, ...answeredEvaluations]);
-        setSelectedId(newPending.length > 0 ? newPending[0].id : null);
-      } else {
-        const newAnswered = answeredEvaluations.filter((e) => e.id !== id);
-        setAnsweredEvaluations(newAnswered);
-        setSelectedId(newAnswered.length > 0 ? newAnswered[0].id : null);
-      }
+      const newEvals = evaluations.filter((e) => e.id !== id);
+      setEvaluations(newEvals);
+      setSelectedId(newEvals.length > 0 ? newEvals[0].id : null);
       closeCoachForm();
       showToast("Entry marked as spam and ignored.");
     } catch (err: any) {
@@ -230,15 +253,9 @@ export default function AdminDashboard() {
     try {
       const res = await fetch(`/api/admin/evaluate/${id}`, { method: "DELETE" });
       if (!res.ok) throw new Error("Failed to delete");
-      const newPending = pendingEvaluations.filter((e) => e.id !== id);
-      setPendingEvaluations(newPending);
-      const newAnswered = answeredEvaluations.filter((e) => e.id !== id);
-      setAnsweredEvaluations(newAnswered);
-      if (selectedId === id) {
-        if (newPending.length > 0) setSelectedId(newPending[0].id);
-        else if (newAnswered.length > 0) setSelectedId(newAnswered[0].id);
-        else setSelectedId(null);
-      }
+      const newEvals = evaluations.filter((e) => e.id !== id);
+      setEvaluations(newEvals);
+      if (selectedId === id) setSelectedId(newEvals.length > 0 ? newEvals[0].id : null);
       showToast("Record permanently deleted.");
     } catch (err: any) {
       showToast("Error: " + err.message, "error");
@@ -294,25 +311,17 @@ export default function AdminDashboard() {
     );
   }
 
-  const allEvaluations = [...pendingEvaluations, ...answeredEvaluations];
-  const filteredPending = pendingEvaluations.filter(e =>
-    e.topic.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    e.queries.some(q => q.toLowerCase().includes(searchQuery.toLowerCase()))
-  );
-  const filteredAnswered = answeredEvaluations.filter(e =>
+  const filteredEvaluations = evaluations.filter(e =>
     e.topic.toLowerCase().includes(searchQuery.toLowerCase()) ||
     e.queries.some(q => q.toLowerCase().includes(searchQuery.toLowerCase()))
   );
 
-  const selectedEval = allEvaluations.find(e => e.id === selectedId);
-  const selectedActiveTab = selectedEval
-    ? pendingEvaluations.some(e => e.id === selectedEval.id) ? "pending" : "answered"
-    : activeTab === "unanswered" ? "pending" : "answered";
+  const selectedEval = evaluations.find(e => e.id === selectedId);
   const isCoachOpen = selectedEval ? coachFormOpen === selectedEval.id : false;
   const currentForm = selectedEval ? coachForms[selectedEval.id] : null;
 
   return (
-    <div className="h-screen overflow-hidden bg-[#080810] text-zinc-200 flex flex-col font-sans selection:bg-indigo-500/30">
+    <div className="min-h-screen bg-[#080810] text-zinc-200 flex flex-col font-sans selection:bg-indigo-500/30">
 
       {/* ── Toast ─────────────────────────────────────────────────────────────── */}
       <div className={`fixed bottom-6 left-1/2 -translate-x-1/2 z-50 transition-all duration-300 ${toast ? "opacity-100 translate-y-0" : "opacity-0 translate-y-3 pointer-events-none"}`}>
@@ -327,7 +336,9 @@ export default function AdminDashboard() {
       {/* ── Header ────────────────────────────────────────────────────────────── */}
       <header className="h-14 border-b border-zinc-800/60 bg-[#080810]/90 backdrop-blur-md flex items-center justify-between px-6 sticky top-0 z-10 shrink-0">
         <div className="flex items-center gap-3">
-          <img src="/logo-pemkot.png" alt="Pemkot Logo" className="h-9 w-auto object-contain flex-shrink-0 drop-shadow-sm" />
+          <div className="w-8 h-8 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center">
+            <Sparkles size={15} className="text-indigo-400" />
+          </div>
           <div>
             <h1 className="text-sm font-semibold text-zinc-100 leading-tight">PBG Assist — AI Coach</h1>
             <p className="text-[10px] text-zinc-600 uppercase tracking-widest font-medium">Knowledge Base Inbox</p>
@@ -339,144 +350,119 @@ export default function AdminDashboard() {
 
           <div className="w-px h-6 bg-zinc-800/80 mx-1"></div>
 
-
+          <div className="flex items-center bg-zinc-900/50 p-1 rounded-lg border border-zinc-800/60">
+            <button
+              onClick={() => setActiveTab("pending")}
+              className={`px-5 py-1.5 text-xs font-medium rounded-md transition-all ${activeTab === "pending" ? "bg-zinc-800 text-zinc-100 shadow-sm" : "text-zinc-500 hover:text-zinc-300"}`}
+            >
+              Unanswered
+              {activeTab === "pending" && evaluations.length > 0 && (
+                <span className="ml-2 bg-indigo-500/20 text-indigo-400 text-[10px] font-bold px-1.5 py-0.5 rounded-full">{evaluations.length}</span>
+              )}
+            </button>
+            <button
+              onClick={() => setActiveTab("answered")}
+              className={`px-5 py-1.5 text-xs font-medium rounded-md transition-all ${activeTab === "answered" ? "bg-zinc-800 text-zinc-100 shadow-sm" : "text-zinc-500 hover:text-zinc-300"}`}
+            >
+              Answered
+            </button>
+          </div>
           <button onClick={() => signOut(auth)} className="p-2 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900 rounded-lg transition-all" title="Sign Out">
             <LogOut size={15} />
           </button>
         </div>
       </header>
 
+      {/* ── Sync Progress Banner ──────────────────────────────────────────────── */}
+      {syncing && (
+        <div className="bg-zinc-900/80 border-b border-zinc-800/60 px-6 py-3 flex flex-col gap-2 shrink-0">
+          <div className="flex justify-between items-center text-xs text-zinc-400">
+            <span className="font-medium text-indigo-400">{syncStatus}</span>
+            <span>{syncProgress}%</span>
+          </div>
+          <div className="w-full bg-zinc-950 rounded-full h-1.5 border border-zinc-800/50 overflow-hidden">
+            <div
+              className="bg-indigo-500 h-1.5 rounded-full transition-all duration-300 ease-out relative"
+              style={{ width: `${syncProgress}%` }}
+            >
+              <div className="absolute top-0 left-0 right-0 bottom-0 bg-white/20 animate-pulse"></div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── Main ──────────────────────────────────────────────────────────────── */}
       <div className="flex-1 flex overflow-hidden">
 
-        {/* Single Tabbed Sidebar */}
-        <div className="w-72 border-r border-zinc-800/60 bg-[#080810] flex flex-col shrink-0 overflow-hidden">
-          {/* Search + Tabs header */}
-          <div className="p-3 border-b border-zinc-800/60 shrink-0 space-y-2">
+        {/* Left Sidebar */}
+        <div className="w-72 border-r border-zinc-800/60 bg-[#080810] flex flex-col shrink-0">
+          <div className="p-3 border-b border-zinc-800/60 shrink-0">
             <div className="relative">
               <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-600" />
               <input
                 type="text"
-                placeholder="Search..."
+                placeholder="Search topics or queries…"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 className="w-full bg-zinc-900/50 border border-zinc-800 text-xs text-zinc-200 rounded-lg pl-8 pr-4 py-2 focus:outline-none focus:border-indigo-500/40 focus:ring-1 focus:ring-indigo-500/20 transition-all placeholder:text-zinc-600"
               />
             </div>
-            {/* Tabs */}
-            <div className="flex items-center gap-1 bg-zinc-900/60 border border-zinc-800/60 rounded-lg p-0.5">
-              <button
-                onClick={() => setActiveTab("unanswered")}
-                className={`flex-1 flex items-center justify-center gap-1.5 text-[11px] font-semibold py-1.5 rounded-md transition-all ${
-                  activeTab === "unanswered"
-                    ? "bg-indigo-600/80 text-white shadow-[0_0_10px_rgba(79,70,229,0.3)]"
-                    : "text-zinc-500 hover:text-zinc-300"
-                }`}
-              >
-                <Inbox size={11} />
-                Unanswered
-                {pendingEvaluations.length > 0 && (
-                  <span className={`text-[9px] font-bold px-1 rounded ${
-                    activeTab === "unanswered" ? "bg-white/20 text-white" : "bg-zinc-800 text-zinc-500"
-                  }`}>{pendingEvaluations.length}</span>
-                )}
-              </button>
-              <button
-                onClick={() => setActiveTab("answered")}
-                className={`flex-1 flex items-center justify-center gap-1.5 text-[11px] font-semibold py-1.5 rounded-md transition-all ${
-                  activeTab === "answered"
-                    ? "bg-emerald-600/70 text-white shadow-[0_0_10px_rgba(16,185,129,0.2)]"
-                    : "text-zinc-500 hover:text-zinc-300"
-                }`}
-              >
-                <CheckCircle2 size={11} />
-                Answered
-                {answeredEvaluations.length > 0 && (
-                  <span className={`text-[9px] font-bold px-1 rounded ${
-                    activeTab === "answered" ? "bg-white/20 text-white" : "bg-zinc-800 text-zinc-500"
-                  }`}>{answeredEvaluations.length}</span>
-                )}
-              </button>
-            </div>
           </div>
 
-          {/* Scrollable list — independent of right panel */}
-          <div className="flex-1 overflow-y-auto custom-scrollbar">
-            {activeTab === "unanswered" ? (
-              loading ? (
-                <div className="flex justify-center p-10"><div className="w-2 h-2 rounded-full bg-indigo-500 animate-bounce" /></div>
-              ) : filteredPending.length === 0 ? (
-                <div className="flex flex-col items-center justify-center p-8 text-center h-full gap-3">
-                  <Inbox size={22} className="text-zinc-700" />
-                  <p className="text-zinc-600 text-xs">No pending items.</p>
+          <div className="flex-1 overflow-y-auto">
+            {loading ? (
+              <div className="flex justify-center p-10">
+                <div className="flex items-center gap-1.5">
+                  <div className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-bounce [animation-delay:-0.3s]" />
+                  <div className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-bounce [animation-delay:-0.15s]" />
+                  <div className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-bounce" />
                 </div>
-              ) : (
-                <ul className="divide-y divide-zinc-800/20">
-                  {filteredPending.map((item) => {
-                    const isSelected = selectedId === item.id;
-                    return (
-                      <li key={item.id}>
-                        <button
-                          onClick={() => { setSelectedId(item.id); closeCoachForm(); }}
-                          className={`w-full text-left px-4 py-3.5 transition-all hover:bg-zinc-900/40 relative ${isSelected ? "bg-zinc-900/60" : ""}`}
-                        >
-                          {isSelected && <div className="absolute left-0 top-0 bottom-0 w-0.5 rounded-r bg-indigo-500" />}
-                          <div className="flex items-center justify-between mb-1.5">
-                            <span className={`text-[10px] uppercase font-bold tracking-widest ${isSelected ? "text-indigo-400" : "text-zinc-500"}`}>{item.topic}</span>
-                            <span className="flex items-center gap-1 text-[10px] font-medium text-zinc-500 bg-zinc-800/50 px-1.5 py-0.5 rounded"><MessageSquare size={10} />{item.count || 1}</span>
-                          </div>
-                          <p className={`text-sm mb-2 line-clamp-2 leading-relaxed ${isSelected ? "text-zinc-200" : "text-zinc-400"}`}>"{item.queries[0]}"</p>
-                          <div className="flex items-center gap-1.5 text-[10px] text-zinc-700">
-                            <Clock size={11} /> {new Date(item.timestamp).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
-                          </div>
-                        </button>
-                      </li>
-                    );
-                  })}
-                </ul>
-              )
+              </div>
+            ) : filteredEvaluations.length === 0 ? (
+              <div className="flex flex-col items-center justify-center p-8 text-center h-full gap-3">
+                {activeTab === "pending" ? <Inbox size={22} className="text-zinc-700" /> : <CheckCircle2 size={22} className="text-zinc-700" />}
+                <p className="text-zinc-600 text-xs">No {activeTab} items found.</p>
+              </div>
             ) : (
-              loading ? (
-                <div className="flex justify-center p-10"><div className="w-2 h-2 rounded-full bg-emerald-500 animate-bounce" /></div>
-              ) : filteredAnswered.length === 0 ? (
-                <div className="flex flex-col items-center justify-center p-8 text-center h-full gap-3">
-                  <CheckCircle2 size={22} className="text-zinc-700" />
-                  <p className="text-zinc-600 text-xs">No answered items.</p>
-                </div>
-              ) : (
-                <ul className="divide-y divide-zinc-800/20">
-                  {filteredAnswered.map((item) => {
-                    const isSelected = selectedId === item.id;
-                    const isApproved = item.status === "approved";
-                    return (
-                      <li key={item.id}>
-                        <button
-                          onClick={() => { setSelectedId(item.id); closeCoachForm(); }}
-                          className={`w-full text-left px-4 py-3.5 transition-all hover:bg-zinc-900/40 relative ${isSelected ? "bg-zinc-900/60" : ""}`}
-                        >
-                          {isSelected && <div className={`absolute left-0 top-0 bottom-0 w-0.5 rounded-r ${isApproved ? "bg-emerald-500" : "bg-red-500/70"}`} />}
-                          <div className="flex items-center justify-between mb-1.5">
-                            <span className={`text-[10px] uppercase font-bold tracking-widest ${isSelected ? "text-indigo-400" : "text-zinc-500"}`}>{item.topic}</span>
-                            <span className="flex items-center gap-1 text-[10px] font-medium text-zinc-500 bg-zinc-800/50 px-1.5 py-0.5 rounded"><MessageSquare size={10} />{item.count || 1}</span>
+              <ul className="divide-y divide-zinc-800/20">
+                {filteredEvaluations.map((item) => {
+                  const isSelected = selectedId === item.id;
+                  const isApproved = item.status === "approved";
+                  const isRejected = item.status === "rejected";
+                  return (
+                    <li key={item.id}>
+                      <button
+                        onClick={() => { setSelectedId(item.id); closeCoachForm(); }}
+                        className={`w-full text-left px-4 py-3.5 transition-all hover:bg-zinc-900/40 relative ${isSelected ? "bg-zinc-900/60" : ""}`}
+                      >
+                        {isSelected && (
+                          <div className={`absolute left-0 top-0 bottom-0 w-0.5 rounded-r ${isApproved ? "bg-emerald-500" : isRejected ? "bg-red-500/70" : "bg-indigo-500"}`} />
+                        )}
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-xs font-semibold text-zinc-200 truncate pr-2">{item.topic.replace(/_/g, " ")}</span>
+                          <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full shrink-0 bg-zinc-800 text-zinc-500">{item.count}×</span>
+                        </div>
+                        <p className="text-[11px] text-zinc-600 line-clamp-1 mb-2">{item.queries[0]}</p>
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-1.5 text-[10px] text-zinc-700">
+                            <Clock size={11} />
+                            {new Date(item.timestamp).toLocaleDateString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
                           </div>
-                          <p className={`text-sm mb-2 line-clamp-2 leading-relaxed ${isSelected ? "text-zinc-200" : "text-zinc-400"}`}>"{item.queries[0]}"</p>
-                          <div className="flex items-center justify-between text-[10px] text-zinc-700">
-                            <div className="flex items-center gap-1.5">
-                              <Clock size={11} /> {new Date(item.timestamp).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
-                            </div>
+                          {activeTab === "answered" && (
                             <span className={`text-[9px] uppercase font-bold tracking-widest ${isApproved ? "text-emerald-500" : "text-red-400"}`}>
                               {isApproved ? "Injected" : "Spam"}
                             </span>
-                          </div>
-                        </button>
-                      </li>
-                    );
-                  })}
-                </ul>
-              )
+                          )}
+                        </div>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
             )}
           </div>
         </div>
+
         {/* Right Panel */}
         <div className="flex-1 bg-[#080810] flex flex-col overflow-hidden relative">
           {error && (
@@ -500,17 +486,17 @@ export default function AdminDashboard() {
                       <span className="text-[11px] text-zinc-600">{selectedEval.scenario}</span>
                     </div>
                     <h2 className="text-2xl font-bold text-zinc-100 leading-snug">
-                      {selectedActiveTab === "pending" ? "Review AI Response" : "Answered Entry"}
+                      {activeTab === "pending" ? "Review AI Response" : "Answered Entry"}
                     </h2>
                     <p className="text-sm text-zinc-500 mt-1">
-                      {selectedActiveTab === "pending"
+                      {activeTab === "pending"
                         ? "Coach the AI on how it should answer this type of question."
                         : "This entry has already been processed."}
                     </p>
                   </div>
 
                   <div className="flex items-center gap-2 shrink-0 pt-1">
-                    {selectedActiveTab === "pending" && !isCoachOpen && (
+                    {activeTab === "pending" && !isCoachOpen && (
                       <button
                         onClick={() => openCoachForm(selectedEval)}
                         className="h-9 px-4 flex items-center gap-2 rounded-lg text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 border border-indigo-500/50 transition-all shadow-[0_0_16px_rgba(79,70,229,0.3)] focus:outline-none"
@@ -562,7 +548,7 @@ export default function AdminDashboard() {
                   <h3 className="text-[11px] font-semibold uppercase tracking-widest text-zinc-500 mb-3 flex items-center gap-2">
                     <Bot size={13} />
                     AI Generated Response
-                    {selectedActiveTab === "pending" && (
+                    {activeTab === "pending" && (
                       <span className="text-[10px] text-amber-500/80 bg-amber-500/10 border border-amber-500/20 px-2 py-0.5 rounded-full">Needs Review</span>
                     )}
                   </h3>
@@ -574,7 +560,7 @@ export default function AdminDashboard() {
                 </section>
 
                 {/* ── Previous Coaching (answered tab) ────────────────────────── */}
-                {selectedActiveTab === "answered" && selectedEval.admin_note && (
+                {activeTab === "answered" && selectedEval.admin_note && (
                   <section>
                     <h3 className="text-[11px] font-semibold uppercase tracking-widest text-emerald-500/80 mb-3 flex items-center gap-2">
                       <BookOpen size={13} />
@@ -692,7 +678,7 @@ export default function AdminDashboard() {
                 )}
 
                 {/* Prompt when form is closed on pending tab */}
-                {selectedActiveTab === "pending" && !isCoachOpen && (
+                {activeTab === "pending" && !isCoachOpen && (
                   <div className="rounded-xl border border-dashed border-zinc-800/80 p-5 text-center">
                     <p className="text-xs text-zinc-600">
                       Click{" "}
