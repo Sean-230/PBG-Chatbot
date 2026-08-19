@@ -174,6 +174,29 @@ async def intercept_and_log(user_query: str, ai_response: str, golden_chunk_used
         logger.debug("Interceptor: Golden Chunk used — skipping log.")
         return
 
+    # ── Skip if Firestore already has an approved doc for a similar topic ─────
+    # This prevents re-logging prompts whose topics have already been approved,
+    # which was causing "doubled" entries in the admin panel.
+    if db:
+        try:
+            def check_already_approved():
+                # Fetch all approved topics
+                approved = db.collection("pending_evaluations").where("status", "==", "approved").get()
+                return [d.to_dict().get("queries", []) for d in approved]
+
+            approved_query_lists = await asyncio.to_thread(check_already_approved)
+            # Flatten all approved queries into one set for fast lookup
+            all_approved_queries = set()
+            for q_list in approved_query_lists:
+                for q in q_list:
+                    all_approved_queries.add(q.strip().lower())
+
+            if user_query.strip().lower() in all_approved_queries:
+                logger.info("Interceptor: Query already approved — skipping log.")
+                return
+        except Exception as e:
+            logger.warning(f"Could not check approved topics: {e}")
+
     ai_response_stripped = ai_response.strip()
     response_lower = ai_response_stripped.lower()
 
@@ -252,15 +275,18 @@ async def intercept_and_log(user_query: str, ai_response: str, golden_chunk_used
     logger.info(f"Interceptor: classified as {scenario_name}. Extracting topic...")
 
     try:
-        # Fetch existing pending topics to help LLM deduplicate
+        # Fetch existing topics (both pending AND approved) to help LLM deduplicate
         existing_topics = []
+        approved_topics = set()
         if db:
             try:
-                # We do this synchronously in a thread
                 def get_topics():
-                    return [d.to_dict().get("topic") for d in db.collection("pending_evaluations").where("status", "==", "pending").get()]
-                existing_topics = await asyncio.to_thread(get_topics)
-                existing_topics = list(set([t for t in existing_topics if t]))
+                    pending = [d.to_dict().get("topic") for d in db.collection("pending_evaluations").where("status", "==", "pending").get()]
+                    approved = [d.to_dict().get("topic") for d in db.collection("pending_evaluations").where("status", "==", "approved").get()]
+                    return pending, approved
+                pending_list, approved_list = await asyncio.to_thread(get_topics)
+                existing_topics = list(set([t for t in pending_list + approved_list if t]))
+                approved_topics = set([t for t in approved_list if t])
             except Exception as e:
                 logger.warning(f"Could not fetch existing topics for dedup: {e}")
 
@@ -322,6 +348,11 @@ async def intercept_and_log(user_query: str, ai_response: str, golden_chunk_used
             save_pending_json(data)
 
         if db:
+            # Skip if this topic is already approved — don't create duplicate pending entries
+            if topic_slug in approved_topics:
+                logger.info(f"Interceptor: Topic '{topic_slug}' already approved — skipping Firestore write.")
+                return
+
             def firestore_ops():
                 pending_ref = db.collection("pending_evaluations")
                 query = (

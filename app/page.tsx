@@ -299,7 +299,23 @@ function MessageBubble({
                 h2: ({ node, ...props }) => <h2 className="text-lg font-bold mb-2 mt-4" style={{ color: "var(--text-primary)" }} {...props} />,
                 h3: ({ node, ...props }) => <h3 className="text-md font-bold mb-2 mt-3" style={{ color: "var(--text-primary)" }} {...props} />,
                 strong: ({ node, ...props }) => <strong className="font-semibold" style={{ color: "var(--text-primary)" }} {...props} />,
-                img: ({ node, ...props }) => <img className="rounded-lg max-w-full h-auto mt-2 mb-4 border shadow-sm" style={{ borderColor: "var(--border)", maxHeight: "250px", objectFit: "cover" }} {...props} />,
+                img: ({ node, ...props }) => <img className="rounded-lg border shadow-sm" style={{ borderColor: "var(--border)", maxHeight: "220px", width: "auto", objectFit: "cover", display: "inline-block" }} {...props} />,
+                p: ({ node, children, ...props }) => {
+                  // Check if this paragraph contains ONLY images — if so, render as horizontal grid
+                  const childArray = Array.isArray(children) ? children : [children];
+                  const allImages = childArray.every(
+                    (child: any) => child && typeof child === 'object' && child.type === 'img'
+                  );
+                  if (allImages && childArray.length > 1) {
+                    return (
+                      <div className="flex flex-wrap gap-2 mt-2 mb-3" {...props}>
+                        {children}
+                      </div>
+                    );
+                  }
+                  return <p className="mb-2 leading-relaxed" {...props}>{children}</p>;
+                },
+
                 a: ({ node, ...props }) => <a className="text-blue-500 hover:text-blue-600 underline" target="_blank" rel="noopener noreferrer" {...props} />,
                 code: ({ node, inline, className, children, ...props }: any) => {
                   return inline ? (
