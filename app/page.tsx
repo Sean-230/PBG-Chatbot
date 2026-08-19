@@ -291,17 +291,8 @@ function MessageBubble({
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}
               components={{
-                p: ({ node, ...props }) => <p className="mb-2 last:mb-0 leading-relaxed" {...props} />,
-                ul: ({ node, ...props }) => <ul className="list-disc pl-5 mb-2 space-y-1" {...props} />,
-                ol: ({ node, ...props }) => <ol className="list-decimal pl-5 mb-2 space-y-1" {...props} />,
-                li: ({ node, ...props }) => <li {...props} />,
-                h1: ({ node, ...props }) => <h1 className="text-xl font-bold mb-2 mt-4" style={{ color: "var(--text-primary)" }} {...props} />,
-                h2: ({ node, ...props }) => <h2 className="text-lg font-bold mb-2 mt-4" style={{ color: "var(--text-primary)" }} {...props} />,
-                h3: ({ node, ...props }) => <h3 className="text-md font-bold mb-2 mt-3" style={{ color: "var(--text-primary)" }} {...props} />,
-                strong: ({ node, ...props }) => <strong className="font-semibold" style={{ color: "var(--text-primary)" }} {...props} />,
-                img: ({ node, ...props }) => <img className="rounded-lg border shadow-sm" style={{ borderColor: "var(--border)", maxHeight: "220px", width: "auto", objectFit: "cover", display: "inline-block" }} {...props} />,
                 p: ({ node, children, ...props }) => {
-                  // Check if this paragraph contains ONLY images — if so, render as horizontal grid
+                  // Check if this paragraph contains ONLY images — render as horizontal grid
                   const childArray = Array.isArray(children) ? children : [children];
                   const allImages = childArray.every(
                     (child: any) => child && typeof child === 'object' && child.type === 'img'
@@ -313,9 +304,16 @@ function MessageBubble({
                       </div>
                     );
                   }
-                  return <p className="mb-2 leading-relaxed" {...props}>{children}</p>;
+                  return <p className="mb-2 last:mb-0 leading-relaxed" {...props}>{children}</p>;
                 },
-
+                ul: ({ node, ...props }) => <ul className="list-disc pl-5 mb-2 space-y-1" {...props} />,
+                ol: ({ node, ...props }) => <ol className="list-decimal pl-5 mb-2 space-y-1" {...props} />,
+                li: ({ node, ...props }) => <li {...props} />,
+                h1: ({ node, ...props }) => <h1 className="text-xl font-bold mb-2 mt-4" style={{ color: "var(--text-primary)" }} {...props} />,
+                h2: ({ node, ...props }) => <h2 className="text-lg font-bold mb-2 mt-4" style={{ color: "var(--text-primary)" }} {...props} />,
+                h3: ({ node, ...props }) => <h3 className="text-md font-bold mb-2 mt-3" style={{ color: "var(--text-primary)" }} {...props} />,
+                strong: ({ node, ...props }) => <strong className="font-semibold" style={{ color: "var(--text-primary)" }} {...props} />,
+                img: ({ node, ...props }) => <img className="rounded-lg border shadow-sm" style={{ borderColor: "var(--border)", maxHeight: "220px", width: "auto", objectFit: "cover", display: "inline-block" }} {...props} />,
                 a: ({ node, ...props }) => <a className="text-blue-500 hover:text-blue-600 underline" target="_blank" rel="noopener noreferrer" {...props} />,
                 code: ({ node, inline, className, children, ...props }: any) => {
                   return inline ? (
