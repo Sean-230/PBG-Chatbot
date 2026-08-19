@@ -299,7 +299,8 @@ function MessageBubble({
                 h2: ({ node, ...props }) => <h2 className="text-lg font-bold mb-2 mt-4" style={{ color: "var(--text-primary)" }} {...props} />,
                 h3: ({ node, ...props }) => <h3 className="text-md font-bold mb-2 mt-3" style={{ color: "var(--text-primary)" }} {...props} />,
                 strong: ({ node, ...props }) => <strong className="font-semibold" style={{ color: "var(--text-primary)" }} {...props} />,
-                a: ({ node, ...props }) => <a className="text-indigo-400 hover:underline" {...props} />,
+                img: ({ node, ...props }) => <img className="rounded-lg max-w-full h-auto mt-2 mb-4 border shadow-sm" style={{ borderColor: "var(--border)", maxHeight: "250px", objectFit: "cover" }} {...props} />,
+                a: ({ node, ...props }) => <a className="text-blue-500 hover:text-blue-600 underline" target="_blank" rel="noopener noreferrer" {...props} />,
                 code: ({ node, inline, className, children, ...props }: any) => {
                   return inline ? (
                     <code className="px-1.5 py-0.5 rounded text-xs font-mono" style={{ background: "var(--bg-input)", color: "#f472b6" }} {...props}>
@@ -428,6 +429,7 @@ export default function ChatPage() {
 
   // States for delete confirmation
   const [sessionToDelete, setSessionToDelete] = useState<string | null>(null);
+  const [showDeleteAllConfirm, setShowDeleteAllConfirm] = useState(false);
 
   const { messages, setMessages, sendMessage, isLoading } = usePBGChat();
 
@@ -909,9 +911,22 @@ export default function ChatPage() {
                 >
                   <div className="p-3 border-b flex items-center justify-between" style={{ borderColor: "var(--border)" }}>
                      <p className="text-xs font-bold" style={{ color: "var(--text-primary)" }}>Chat History</p>
-                     <span className="text-[10px] px-2 py-0.5 rounded-full" style={{ background: "var(--bg-input)", color: "var(--text-secondary)" }}>
-                        {sessions.length} Session{sessions.length !== 1 ? 's' : ''}
-                     </span>
+                     <div className="flex items-center gap-2">
+                       {sessions.length > 0 && (
+                         <button 
+                           onClick={(e) => {
+                             e.stopPropagation();
+                             setShowDeleteAllConfirm(true);
+                           }}
+                           className="text-[10px] text-red-400 hover:text-red-500 hover:underline px-1 transition-colors"
+                         >
+                           Delete All
+                         </button>
+                       )}
+                       <span className="text-[10px] px-2 py-0.5 rounded-full" style={{ background: "var(--bg-input)", color: "var(--text-secondary)" }}>
+                          {sessions.length} Session{sessions.length !== 1 ? 's' : ''}
+                       </span>
+                     </div>
                   </div>
                   <div className="overflow-y-auto flex-1 p-2 space-y-1">
                     {sessions.length === 0 ? (
@@ -1169,6 +1184,48 @@ export default function ChatPage() {
                 }}
               >
                 Hapus
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete All Confirmation Modal */}
+      {showDeleteAllConfirm && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+          <div 
+            className="w-full max-w-sm rounded-2xl p-6 shadow-2xl animate-in fade-in zoom-in-95 duration-200"
+            style={{ background: "var(--bg-surface)", border: "1px solid var(--border)" }}
+          >
+            <h3 className="text-lg font-semibold mb-2" style={{ color: "var(--text-primary)" }}>Hapus Semua Obrolan</h3>
+            <p className="text-sm mb-6" style={{ color: "var(--text-secondary)" }}>
+              Apakah Anda yakin ingin menghapus <strong>seluruh</strong> riwayat obrolan? Tindakan ini tidak dapat dibatalkan.
+            </p>
+            <div className="flex items-center justify-end gap-3">
+              <button
+                onClick={() => setShowDeleteAllConfirm(false)}
+                className="px-4 py-2 text-sm rounded-xl transition-colors hover:bg-black/5 dark:hover:bg-white/5"
+                style={{ color: "var(--text-secondary)", border: "1px solid var(--border)" }}
+              >
+                Batal
+              </button>
+              <button
+                onClick={() => {
+                  localStorage.removeItem("pbg-chat-sessions");
+                  setSessions([]);
+                  setShowDeleteAllConfirm(false);
+                  setIsDropdownOpen(false);
+                }}
+                className="px-4 py-2 text-sm rounded-xl text-white transition-colors"
+                style={{ background: "#ef4444", border: "1px solid #ef4444" }}
+                onMouseEnter={(e) => {
+                  (e.currentTarget as HTMLButtonElement).style.background = "#dc2626";
+                }}
+                onMouseLeave={(e) => {
+                  (e.currentTarget as HTMLButtonElement).style.background = "#ef4444";
+                }}
+              >
+                Ya, Hapus Semua
               </button>
             </div>
           </div>

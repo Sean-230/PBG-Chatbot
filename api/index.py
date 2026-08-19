@@ -382,7 +382,7 @@ def build_gemini_history(messages: list[Message]) -> list[types.Content]:
     return history
 
 
-def dispatch_tool_call(function_call: types.FunctionCall) -> types.Content:
+async def dispatch_tool_call(function_call: types.FunctionCall) -> types.Content:
     """
     Executes a Gemini-requested tool call and returns the result as a
     Content object ready to be sent back to the model.
@@ -397,7 +397,9 @@ def dispatch_tool_call(function_call: types.FunctionCall) -> types.Content:
         result_str = json.dumps({"error": f"Unknown tool: {name}"})
     else:
         try:
-            result_str = handler(**args)
+            def _run_tool():
+                return handler(**args)
+            result_str = await asyncio.to_thread(_run_tool)
         except Exception as exc:
             logger.error(f"Tool execution error [{name}]: {exc}")
             result_str = json.dumps({"error": str(exc)})
@@ -531,15 +533,18 @@ async def generate_stream(messages: list[Message]) -> AsyncGenerator[str, None]:
     # ── Agentic loop: keep iterating until no more tool calls ────────────────
     MAX_TOOL_ROUNDS = 5  # Safety limit to prevent infinite loops
     final_response_text = ""
-    try:
-        for round_num in range(MAX_TOOL_ROUNDS):
+    
+    for round_num in range(MAX_TOOL_ROUNDS):
+        try:
             logger.info(f"Gemini generation round {round_num + 1}")
 
-            response = client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=contents,
-                config=gen_config,
-            )
+            def _gen():
+                return client.models.generate_content(
+                    model=GEMINI_MODEL,
+                    contents=contents,
+                    config=gen_config,
+                )
+            response = await asyncio.to_thread(_gen)
 
             candidate = response.candidates[0]
             has_tool_call = False
@@ -551,7 +556,7 @@ async def generate_stream(messages: list[Message]) -> AsyncGenerator[str, None]:
                     # Append the model's function_call turn to history
                     contents.append(candidate.content)
                     # Execute the tool and append its result
-                    tool_result = dispatch_tool_call(part.function_call)
+                    tool_result = await dispatch_tool_call(part.function_call)
                     contents.append(tool_result)
                     break  # Restart the loop with updated history
 
@@ -564,68 +569,46 @@ async def generate_stream(messages: list[Message]) -> AsyncGenerator[str, None]:
             if not has_tool_call:
                 # No tool was called; generation is complete.
                 asyncio.create_task(intercept_and_log(last_user_question, final_response_text, bool(golden_chunks)))
-                break
-        else:
-            msg = "\n[Sistem: Terlalu banyak pemanggilan tool. Silakan coba lagi.]"
-            yield f'0:{json.dumps(msg)}\n'
+                return # Exit successfully
+                
+        except Exception as exc:
+            error_msg = str(exc)
+            logger.error(f"Gemini API error: {error_msg}")
 
-    except Exception as exc:
-        error_msg = str(exc)
-        logger.error(f"Gemini API error: {error_msg}")
-
-        # ── Fallback: if 429 was caused by google_search quota, retry without it
-        if ("429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg) and {"google_search": {}} in tools_list:
-            logger.info("Retrying WITHOUT Google Search (grounding quota likely exhausted)")
-            try:
-                gen_config_fallback = types.GenerateContentConfig(
+            # ── Fallback: if 429 was caused by google_search quota, retry without it
+            if ("429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg) and {"google_search": {}} in tools_list:
+                logger.info("Retrying WITHOUT Google Search (grounding quota likely exhausted)")
+                tools_list = [TOOL_DECLARATIONS]
+                gen_config = types.GenerateContentConfig(
                     system_instruction=effective_system_prompt,
                     temperature=0.4,
                     max_output_tokens=2048,
-                    tools=[TOOL_DECLARATIONS],
+                    tools=tools_list,
                 )
-                # Reset contents to original (remove any tool call artifacts)
-                contents_fallback = build_gemini_history(messages)
-                response = client.models.generate_content(
-                    model=GEMINI_MODEL,
-                    contents=contents_fallback,
-                    config=gen_config_fallback,
-                )
-                has_text = False
-                for part in response.candidates[0].content.parts:
-                    if part.text:
-                        has_text = True
-                        final_response_text += part.text
-                        yield f'0:{json.dumps(part.text)}\n'
+                continue # Restart the loop without Google search!
                 
-                if not has_text:
-                    msg = "Mohon maaf, sistem sedang sibuk atau mengalami gangguan saat mencari data (fallback). Silakan coba lagi."
-                    yield f'0:{json.dumps(msg)}\n'
-                else:
-                    asyncio.create_task(intercept_and_log(last_user_question, final_response_text, bool(golden_chunks)))
-                return
-            except Exception as fallback_exc:
-                error_msg = str(fallback_exc)
-                logger.error(f"Fallback also failed: {error_msg}")
-
-        if "API_KEY_INVALID" in error_msg or "INVALID_ARGUMENT" in error_msg or "401" in error_msg:
-            msg = (
-                "❌ **Konfigurasi API Key tidak valid.**\n\n"
-                "Pastikan `GEMINI_API_KEY` di file `.env` adalah kunci Gemini yang benar "
-                "(dimulai dengan `AIza...`). Dapatkan kunci di: "
-                "https://aistudio.google.com/app/apikey"
-            )
-            yield f'0:{json.dumps(msg)}\n'
-        elif "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
-            msg = (
-                "❌ **Kuota API Telah Habis (Error 429).**\n\n"
-                "Anda telah melewati batas penggunaan API Gemini (rate limit/kuota harian). "
-                "Silakan tunggu beberapa saat dan coba lagi, atau tingkatkan tier API Anda "
-                "dengan menambahkan informasi billing di Google AI Studio."
-            )
-            yield f'0:{json.dumps(msg)}\n'
-        else:
-            msg = f"❌ Terjadi kesalahan pada server AI: {error_msg}"
-            yield f'0:{json.dumps(msg)}\n'
+            # If it's another error, stop the stream and report it
+            if "API_KEY_INVALID" in error_msg or "INVALID_ARGUMENT" in error_msg or "401" in error_msg:
+                msg = (
+                    "❌ **Konfigurasi API Key tidak valid.**\n\n"
+                    "Pastikan `GEMINI_API_KEY` di file `.env` adalah kunci Gemini yang benar "
+                    "(dimulai dengan `AIza...`). Dapatkan kunci di: "
+                    "https://aistudio.google.com/app/apikey"
+                )
+                yield f'0:{json.dumps(msg)}\n'
+            elif "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
+                msg = (
+                    "❌ **Kuota API Telah Habis (Error 429).**\n\n"
+                    "Anda telah melewati batas penggunaan API Gemini (rate limit/kuota harian). "
+                    "Silakan tunggu beberapa saat dan coba lagi, atau tingkatkan tier API Anda "
+                    "dengan menambahkan informasi billing di Google AI Studio."
+                )
+                yield f'0:{json.dumps(msg)}\n'
+            else:
+                msg = f"❌ Terjadi kesalahan pada server AI: {error_msg}"
+                yield f'0:{json.dumps(msg)}\n'
+            
+            return # Ensure generator stops after yielding error
 
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -804,3 +787,7 @@ async def evaluate_pending(req: EvaluateRequest):
         logger.error(f"Error updating evaluation: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.get("/api/health", tags=["Health"])
+def health_check():
+    return {"status": "ok"}
