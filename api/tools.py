@@ -80,16 +80,24 @@ def check_brangkas(registration_id: str) -> str:
     _HERE = os.path.dirname(os.path.abspath(__file__))
     
     # Load credentials
-    credentials_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-    if credentials_path and credentials_path.startswith("./"):
-        credentials_path = os.path.join(_HERE, credentials_path[2:])
-    elif not credentials_path or not os.path.exists(credentials_path):
-        credentials_path = os.path.join(_HERE, "credentials.json")
-        
     try:
-        creds = service_account.Credentials.from_service_account_file(
-            credentials_path, scopes=['https://www.googleapis.com/auth/drive.readonly']
-        )
+        creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+        if creds_json:
+            import json
+            creds_dict = json.loads(creds_json)
+            creds = service_account.Credentials.from_service_account_info(
+                creds_dict, scopes=['https://www.googleapis.com/auth/drive.readonly']
+            )
+        else:
+            credentials_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+            if credentials_path and credentials_path.startswith("./"):
+                credentials_path = os.path.join(_HERE, credentials_path[2:])
+            elif not credentials_path or not os.path.exists(credentials_path):
+                credentials_path = os.path.join(_HERE, "credentials.json")
+                
+            creds = service_account.Credentials.from_service_account_file(
+                credentials_path, scopes=['https://www.googleapis.com/auth/drive.readonly']
+            )
         service = build('drive', 'v3', credentials=creds, cache_discovery=False)
     except Exception as e:
         return json.dumps({"status": "error", "message": f"Gagal autentikasi Google Drive: {e}"})
